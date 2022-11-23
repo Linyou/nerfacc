@@ -12,10 +12,25 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import tqdm
-from radiance_fields.ngp import NGPradianceField
+from radiance_fields.custom_ngp import NGPDradianceField
 from utils import render_image, set_random_seed
+from custom_utils import custom_render_image
+from visdom import Visdom
+from radiance_fields.mlp import DNeRFRadianceField
 
-from nerfacc import ContractionType, OccupancyGrid
+from nerfacc import ContractionType, OccupancyGrid, loss_distortion
+from nerfacc.taichi_modules import distortion
+
+import taichi as ti
+ti.init(arch=ti.cuda)
+
+def total_variation_loss(x):
+    # Get resolution
+    tv_x = torch.pow(x[1:,:,:,:]-x[:-1,:,:,:], 2).sum()
+    tv_y = torch.pow(x[:,1:,:,:]-x[:,:-1,:,:], 2).sum()
+    tv_z = torch.pow(x[:,:,1:,:]-x[:,:,:-1,:], 2).sum()
+
+    return (tv_x.mean() + tv_y.mean() + tv_z.mean())/3
 
 if __name__ == "__main__":
 
@@ -35,23 +50,15 @@ if __name__ == "__main__":
         type=str,
         default="lego",
         choices=[
-            # nerf synthetic
-            "chair",
-            "drums",
-            "ficus",
-            "hotdog",
+            # dnerf
+            "bouncingballs",
+            "hellwarrior",
+            "hook",
+            "jumpingjacks",
             "lego",
-            "materials",
-            "mic",
-            "ship",
-            # mipnerf360 unbounded
-            "garden",
-            "bicycle",
-            "bonsai",
-            "counter",
-            "kitchen",
-            "room",
-            "stump",
+            "mutant",
+            "standup",
+            "trex",
         ],
         help="which scene to use",
     )
@@ -81,6 +88,8 @@ if __name__ == "__main__":
 
     render_n_samples = 1024
 
+    results_root = '/home/loyot/workspace/code/training_results/nerfacc'
+
     # setup the dataset
     train_dataset_kwargs = {}
     test_dataset_kwargs = {}
@@ -93,9 +102,9 @@ if __name__ == "__main__":
         test_dataset_kwargs = {"factor": 4}
         grid_resolution = 256
     else:
-        from datasets.nerf_synthetic import SubjectLoader
+        from datasets.dnerf_synthetic import SubjectLoader
 
-        data_root_fp = "/home/loyot/workspace/Datasets/NeRF/nerf_synthetic/"
+        data_root_fp = "/home/loyot/workspace/Datasets/NeRF/dynamic_data/"
         target_sample_batch_size = 1 << 18
         grid_resolution = 128
 
@@ -105,11 +114,16 @@ if __name__ == "__main__":
         split=args.train_split,
         num_rays=target_sample_batch_size // render_n_samples,
         **train_dataset_kwargs,
-    )
+    ).to(device)
 
-    train_dataset.images = train_dataset.images.to(device)
-    train_dataset.camtoworlds = train_dataset.camtoworlds.to(device)
-    train_dataset.K = train_dataset.K.to(device)
+    train_dataset_test = SubjectLoader(
+        subject_id=args.scene,
+        root_fp=data_root_fp,
+        split=args.train_split,
+        num_rays=None,
+        **train_dataset_kwargs,
+    ).to(device)
+    train_dataset_test.training = False
 
     test_dataset = SubjectLoader(
         subject_id=args.scene,
@@ -117,10 +131,7 @@ if __name__ == "__main__":
         split="test",
         num_rays=None,
         **test_dataset_kwargs,
-    )
-    test_dataset.images = test_dataset.images.to(device)
-    test_dataset.camtoworlds = test_dataset.camtoworlds.to(device)
-    test_dataset.K = test_dataset.K.to(device)
+    ).to(device)
 
     if args.auto_aabb:
         camera_locs = torch.cat(
@@ -156,7 +167,12 @@ if __name__ == "__main__":
     # setup the radiance field we want to train.
     max_steps = 20000
     grad_scaler = torch.cuda.amp.GradScaler(2**10)
-    radiance_field = NGPradianceField(
+    viz = Visdom()
+    # dnerf_radiance_field = DNeRFRadianceField().to(device)
+    # dnerf_radiance_field.load_state_dict(torch.load('checkpoints/dnerf_lego_30000.pth', map_location=torch.device('cuda')))
+    radiance_field = NGPDradianceField(
+        # dnerf=dnerf_radiance_field,
+        logger=viz,
         aabb=args.aabb,
         unbounded=args.unbounded,
     ).to(device)
@@ -174,6 +190,7 @@ if __name__ == "__main__":
         resolution=grid_resolution,
         contraction_type=contraction_type,
     ).to(device)
+    
 
     # training
     step = 0
@@ -186,6 +203,7 @@ if __name__ == "__main__":
             render_bkgd = data["color_bkgd"]
             rays = data["rays"]
             pixels = data["pixels"]
+            timestamps = data["timestamps"]
 
             def occ_eval_fn(x):
                 if args.cone_angle > 0.0:
@@ -209,14 +227,18 @@ if __name__ == "__main__":
                 else:
                     step_size = render_step_size
                 # compute occupancy
-                density = radiance_field.query_density(x)
+                idxs = torch.randint(0, len(timestamps), (x.shape[0],), device=x.device)
+                t = timestamps[idxs]
+                density = radiance_field.query_density(x, t)
                 return density * step_size
 
-            # update occupancy grid
+
+            # # update occupancy grid
             occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
 
             # render
-            rgb, acc, depth, n_rendering_samples = render_image(
+            # with torch.autocast(device_type='cuda', dtype=torch.float16):
+            rgb, acc, depth, n_rendering_samples, extra = custom_render_image(
                 radiance_field,
                 occupancy_grid,
                 rays,
@@ -228,6 +250,7 @@ if __name__ == "__main__":
                 render_bkgd=render_bkgd,
                 cone_angle=args.cone_angle,
                 alpha_thre=alpha_thre,
+                timestamps=timestamps,
             )
             if n_rendering_samples == 0:
                 continue
@@ -242,38 +265,71 @@ if __name__ == "__main__":
             alive_ray_mask = acc.squeeze(-1) > 0
 
             # compute loss
-            loss = F.smooth_l1_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
+
+            # grid_feat = radiance_field.get_grid()
+            # tv = total_variation_loss(grid_feat.view(64, 64, 64, -1))
+
+            # loss_times = F.smooth_l1_loss(times_acc[alive_ray_mask], timestamps[alive_ray_mask])
+            o = acc[alive_ray_mask]
+            loss_o = (-o*torch.log(o)).mean()*1e-2 
+            loss_extra = (extra[0][alive_ray_mask]).mean()*1e-1
+            # loss_distor = (extra[1][alive_ray_mask] * 0.01).mean()
+            # for k in extra:
+            #     loss_extra += (k[alive_ray_mask]*0.01).mean()
+            rec_loss = F.smooth_l1_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
+            loss = rec_loss + loss_o + loss_extra
+
+            # loss_extra = 0.
+            # # loss_distor = 0.
+            # for (predict, hash_feat, weight, t_starts, t_ends, ray_indices, packed_info) in extra:
+            #     alive_samples_mask = alive_ray_mask[ray_indices.long()]
+            #     loss_extra += F.smooth_l1_loss(predict[alive_samples_mask], hash_feat[alive_samples_mask])*0.1
+            #     # loss_distor += distortion(packed_info, weight, t_starts, t_ends).mean() * 0.01
+            
+            # loss += loss_extra
+                # loss += loss_distor
 
             optimizer.zero_grad()
             # do not unscale it because we are using Adam.
             grad_scaler.scale(loss).backward()
             optimizer.step()
+            # grad_scaler.step(optimizer)
             scheduler.step()
 
-            if step % 10000 == 0:
+            # grad_scaler.update()
+
+            if step % 1000 == 0:
                 elapsed_time = time.time() - tic
                 loss = F.mse_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
                 print(
                     f"elapsed_time={elapsed_time:.2f}s | step={step} | "
-                    f"loss={loss:.5f} | "
+                    f"loss={loss:.5f} | " f"loss_extra={loss_extra:.7f} | "
                     f"alive_ray_mask={alive_ray_mask.long().sum():d} | "
                     f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} |"
                 )
 
             if step >= 0 and step % max_steps == 0 and step > 0:
+               # save the model
+                os.makedirs(f'{results_root}/checkpoints', exist_ok=True)
+                torch.save(
+                    radiance_field.state_dict(),
+                    f"{results_root}/checkpoints/ngp_dnerf_{args.scene}_{step}.pth",
+                )
                 # evaluation
                 radiance_field.eval()
 
-                psnrs = []
                 with torch.no_grad():
-                    for i in tqdm.tqdm(range(len(test_dataset))):
-                        data = test_dataset[i]
+                    psnrs = []
+                    print("save train image")
+                    for i in tqdm.tqdm(range(len(train_dataset_test))):
+                        data = train_dataset_test[i]
                         render_bkgd = data["color_bkgd"]
                         rays = data["rays"]
                         pixels = data["pixels"]
+                        timestamps = data["timestamps"]
 
                         # rendering
-                        rgb, acc, depth, _ = render_image(
+                        rgb, acc, depth, _, = render_image(
                             radiance_field,
                             occupancy_grid,
                             rays,
@@ -287,21 +343,73 @@ if __name__ == "__main__":
                             alpha_thre=alpha_thre,
                             # test options
                             test_chunk_size=args.test_chunk_size,
+                            timestamps=timestamps,
                         )
                         mse = F.mse_loss(rgb, pixels)
                         psnr = -10.0 * torch.log(mse) / np.log(10.0)
                         psnrs.append(psnr.item())
-                        # imageio.imwrite(
-                        #     "acc_binary_test.png",
-                        #     ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
-                        # )
-                        # imageio.imwrite(
-                        #     "rgb_test.png",
-                        #     (rgb.cpu().numpy() * 255).astype(np.uint8),
-                        # )
+                        os.makedirs(f'{results_root}/ngp_dnerf/{args.scene}/train', exist_ok=True)
+                        imageio.imwrite(
+                            f"{results_root}/ngp_dnerf/{args.scene}/train/acc_{i}.png",
+                            ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{results_root}/ngp_dnerf/{args.scene}/train/depth_{i}.png",
+                            (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{results_root}/ngp_dnerf/{args.scene}/train/rgb_{i}.png",
+                            (rgb.cpu().numpy() * 255).astype(np.uint8),
+                        )
                         # break
-                psnr_avg = sum(psnrs) / len(psnrs)
-                print(f"evaluation: psnr_avg={psnr_avg}")
+                    psnr_avg = sum(psnrs) / len(psnrs)
+                    print(f"evaluation: psnr_avg={psnr_avg}")
+                    psnrs = []
+                    for i in tqdm.tqdm(range(len(test_dataset))):
+                        data = test_dataset[i]
+                        render_bkgd = data["color_bkgd"]
+                        rays = data["rays"]
+                        pixels = data["pixels"]
+                        timestamps = data["timestamps"]
+
+                        # rendering
+                        rgb, acc, depth, _, = render_image(
+                            radiance_field,
+                            occupancy_grid,
+                            rays,
+                            scene_aabb,
+                            # rendering options
+                            near_plane=near_plane,
+                            far_plane=far_plane,
+                            render_step_size=render_step_size,
+                            render_bkgd=render_bkgd,
+                            cone_angle=args.cone_angle,
+                            alpha_thre=alpha_thre,
+                            # test options
+                            test_chunk_size=args.test_chunk_size,
+                            timestamps=timestamps,
+                        )
+                        mse = F.mse_loss(rgb, pixels)
+                        psnr = -10.0 * torch.log(mse) / np.log(10.0)
+                        psnrs.append(psnr.item())
+                        os.makedirs(f'{results_root}/ngp_dnerf/{args.scene}', exist_ok=True)
+                        imageio.imwrite(
+                            f"{results_root}/ngp_dnerf/{args.scene}/acc_{i}.png",
+                            ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{results_root}/ngp_dnerf/{args.scene}/depth_{i}.png",
+                            (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{results_root}/ngp_dnerf/{args.scene}/rgb_{i}.png",
+                            (rgb.cpu().numpy() * 255).astype(np.uint8),
+                        )
+                    psnr_avg = sum(psnrs) / len(psnrs)
+                    print(f"evaluation: psnr_avg={psnr_avg}")
+
+                # psnr_avg = sum(psnrs) / len(psnrs)
+                # print(f"evaluation: psnr_avg={psnr_avg}")
                 train_dataset.training = True
 
             if step == max_steps:

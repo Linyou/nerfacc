@@ -8,6 +8,10 @@ from torch import Tensor
 
 import nerfacc.cuda as _C
 
+from torch.cuda.amp import custom_fwd, custom_bwd
+
+custom_type = torch.float32
+
 
 def pack_data(data: Tensor, mask: Tensor) -> Tuple[Tensor, Tensor]:
     """Pack per-ray data (n_rays, n_samples, D) to (all_samples, D) based on mask.
@@ -171,6 +175,7 @@ class _UnpackData(torch.autograd.Function):
     """Unpack packed data (all_samples, D) to per-ray data (n_rays, n_samples, D)."""
 
     @staticmethod
+    @custom_fwd(cast_inputs=custom_type)
     def forward(ctx, packed_info: Tensor, data: Tensor, n_samples: int):
         # shape of the data should be (all_samples, D)
         packed_info = packed_info.contiguous().int()
@@ -181,6 +186,7 @@ class _UnpackData(torch.autograd.Function):
         return _C.unpack_data(packed_info, data, n_samples)
 
     @staticmethod
+    @custom_bwd
     def backward(ctx, grad: Tensor):
         # shape of the grad should be (n_rays, n_samples, D)
         packed_info = ctx.saved_tensors[0]

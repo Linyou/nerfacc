@@ -2,7 +2,6 @@ from torch import Tensor
 
 from .pack import unpack_data
 
-
 def distortion(
     packed_info: Tensor, weights: Tensor, t_starts: Tensor, t_ends: Tensor
 ) -> Tensor:
@@ -18,7 +17,7 @@ def distortion(
         Distortion loss. (n_rays,)
     """
     # （all_samples, 1) -> (n_rays, n_samples)
-    w = unpack_data(packed_info, weights[..., None]).squeeze(-1)
+    w = unpack_data(packed_info, weights).squeeze(-1)
     t1 = unpack_data(packed_info, t_starts).squeeze(-1)
     t2 = unpack_data(packed_info, t_ends).squeeze(-1)
 
@@ -30,3 +29,4 @@ def distortion(
     mm = (tmid.unsqueeze(-1) - tmid.unsqueeze(-2)).abs()
     loss_bi = (ww * mm).sum((-1, -2))
     return loss_uni + loss_bi
+

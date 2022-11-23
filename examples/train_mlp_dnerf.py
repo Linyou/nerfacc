@@ -64,6 +64,8 @@ if __name__ == "__main__":
 
     render_n_samples = 1024
 
+    results_root = '/home/loyot/workspace/code/training_results/nerfacc'
+
     # setup the scene bounding box.
     contraction_type = ContractionType.AABB
     scene_aabb = torch.tensor(args.aabb, dtype=torch.float32, device=device)
@@ -91,7 +93,7 @@ if __name__ == "__main__":
         gamma=0.33,
     )
     # setup the dataset
-    data_root_fp = "/home/ruilongli/data/dnerf/"
+    data_root_fp = "/home/loyot/workspace/Datasets/NeRF/dynamic_data/"
     target_sample_batch_size = 1 << 16
     grid_resolution = 128
 
@@ -100,22 +102,14 @@ if __name__ == "__main__":
         root_fp=data_root_fp,
         split=args.train_split,
         num_rays=target_sample_batch_size // render_n_samples,
-    )
-    train_dataset.images = train_dataset.images.to(device)
-    train_dataset.camtoworlds = train_dataset.camtoworlds.to(device)
-    train_dataset.K = train_dataset.K.to(device)
-    train_dataset.timestamps = train_dataset.timestamps.to(device)
+    ).to(device)
 
     test_dataset = SubjectLoader(
         subject_id=args.scene,
         root_fp=data_root_fp,
         split="test",
         num_rays=None,
-    )
-    test_dataset.images = test_dataset.images.to(device)
-    test_dataset.camtoworlds = test_dataset.camtoworlds.to(device)
-    test_dataset.K = test_dataset.K.to(device)
-    test_dataset.timestamps = test_dataset.timestamps.to(device)
+    ).to(device)
 
     occupancy_grid = OccupancyGrid(
         roi_aabb=args.aabb,
@@ -192,6 +186,12 @@ if __name__ == "__main__":
                 )
 
             if step >= 0 and step % max_steps == 0 and step > 0:
+                # save the model
+                os.makedirs(f'{results_root}/checkpoints', exist_ok=True)
+                torch.save(
+                    radiance_field.state_dict(),
+                    f"{results_root}/checkpoints/dnerf_{args.scene}_{step}.pth",
+                )
                 # evaluation
                 radiance_field.eval()
 
@@ -225,14 +225,19 @@ if __name__ == "__main__":
                         mse = F.mse_loss(rgb, pixels)
                         psnr = -10.0 * torch.log(mse) / np.log(10.0)
                         psnrs.append(psnr.item())
-                        # imageio.imwrite(
-                        #     "acc_binary_test.png",
-                        #     ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
-                        # )
-                        # imageio.imwrite(
-                        #     "rgb_test.png",
-                        #     (rgb.cpu().numpy() * 255).astype(np.uint8),
-                        # )
+                        os.mkdir(f'{results_root}/mlp_dnerf/{args.scene}', exist_ok=True)
+                        imageio.imwrite(
+                            f"{results_root}/mlp_dnerf/{args.scene}/acc_{i}.png",
+                            ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{results_root}/mlp_dnerf/{args.scene}/depth_{i}.png",
+                            (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{results_root}/mlp_dnerf/{args.scene}/rgb_{i}.png",
+                            (rgb.cpu().numpy() * 255).astype(np.uint8),
+                        )
                         # break
                 psnr_avg = sum(psnrs) / len(psnrs)
                 print(f"evaluation: psnr_avg={psnr_avg}")

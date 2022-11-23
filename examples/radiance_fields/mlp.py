@@ -9,6 +9,7 @@ from typing import Callable, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.cuda.amp import autocast
 
 
 class MLP(nn.Module):
@@ -84,6 +85,7 @@ class MLP(nn.Module):
 
             self.output_layer.apply(init_func_output)
 
+    @autocast()
     def forward(self, x):
         inputs = x
         for i in range(self.net_depth):
@@ -250,11 +252,13 @@ class DNeRFRadianceField(nn.Module):
         super().__init__()
         self.posi_encoder = SinusoidalEncoder(3, 0, 4, True)
         self.time_encoder = SinusoidalEncoder(1, 0, 4, True)
+        print("canonical out dim: ", self.posi_encoder.latent_dim)
+        print("time out dim: ", self.time_encoder.latent_dim)
         self.warp = MLP(
             input_dim=self.posi_encoder.latent_dim
             + self.time_encoder.latent_dim,
             output_dim=3,
-            net_depth=4,
+            net_depth=2,
             net_width=64,
             skip_layer=2,
             output_init=functools.partial(torch.nn.init.uniform_, b=1e-4),

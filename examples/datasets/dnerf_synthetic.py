@@ -124,6 +124,13 @@ class SubjectLoader(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.images)
 
+    def to(self, device):
+        self.K = self.K.to(device)
+        self.images = self.images.to(device)
+        self.camtoworlds = self.camtoworlds.to(device)
+        self.timestamps = self.timestamps.to(device)
+        return self
+
     @torch.no_grad()
     def __getitem__(self, index):
         data = self.fetch_data(index)

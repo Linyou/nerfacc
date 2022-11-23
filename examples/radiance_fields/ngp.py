@@ -4,9 +4,13 @@ Copyright (c) 2022 Ruilong Li, UC Berkeley.
 
 from typing import Callable, List, Union
 
+import functools
+import numpy as np
 import torch
 from torch.autograd import Function
+import torch.nn.functional as F
 from torch.cuda.amp import custom_bwd, custom_fwd
+from .mlp import SinusoidalEncoder, MLP
 
 try:
     import tinycudann as tcnn
@@ -87,7 +91,7 @@ class NGPradianceField(torch.nn.Module):
         self.unbounded = unbounded
 
         self.geo_feat_dim = geo_feat_dim
-        per_level_scale = 1.4472692012786865
+        per_level_scale = 1.3195079565048218
 
         if self.use_viewdirs:
             self.direction_encoding = tcnn.Encoding(
