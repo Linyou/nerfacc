@@ -307,6 +307,31 @@ class NGPDradianceField(NGPradianceField):
         # self.viz.line([0.], [0.], win='z_scale', opts=dict(title='z_scale', legend=['x', 'y', 'z']))
         self.name = ['x', 'y', 'z']
 
+    def log_move(self, move):
+
+        if self.logger_count % 50 == 0:
+            i = self.logger_count
+            t_move = move
+            for j in range(3):
+                j_move = torch.abs(t_move[:, j])
+                self.viz.line([torch.mean(j_move).item()], [i], win='move_mean', update='append', name=self.name[j])
+                self.viz.line([torch.min(j_move).item()], [i], win='move_min', update='append', name=self.name[j])
+                self.viz.line([torch.max(j_move).item()], [i], win='move_max', update='append', name=self.name[j])
+                # j_bmove = self.xyz_scale
+                # self.viz.line([j_bmove[0].item()], [i], win='x_scale', update='append', name=self.name[j])
+                # self.viz.line([j_bmove[1].item()], [i], win='y_scale', update='append', name=self.name[j])
+                # self.viz.line([j_bmove[2].item()], [i], win='z_scale', update='append', name=self.name[j])
+        self.logger_count += 1
+
+    def log_grad(self, step):
+        if step % 50 == 0:
+            parameters_grad = [p.grad.reshape(-1) for p in self.mlp_feat_prediction.parameters()]
+            grad = torch.cat(parameters_grad, dim=-1)
+
+            self.viz.line([torch.mean(grad).item()], [step], win='grad_feat_predict_mean', update='append')
+            self.viz.line([torch.min(grad).item()], [step], win='grad_feat_predict_min', update='append')
+            self.viz.line([torch.max(grad).item()], [step], win='grad_feat_predict_max', update='append')
+
     def query_density(self, x, timestamps, return_feat: bool = False, dir: torch.Tensor = None):
         # move = self.xyz_wrap(x, timestamps).detach()
         # feat = self.wrap(x, timestamps)
@@ -369,20 +394,7 @@ class NGPDradianceField(NGPradianceField):
 
         if return_feat:
             if self.training:
-
-                if self.logger_count % 50 == 0:
-                    i = self.logger_count
-                    t_move = move
-                    for j in range(3):
-                        j_move = torch.abs(t_move[:, j])
-                        self.viz.line([torch.mean(j_move).item()], [i], win='move_mean', update='append', name=self.name[j])
-                        self.viz.line([torch.min(j_move).item()], [i], win='move_min', update='append', name=self.name[j])
-                        self.viz.line([torch.max(j_move).item()], [i], win='move_max', update='append', name=self.name[j])
-                        # j_bmove = self.xyz_scale
-                        # self.viz.line([j_bmove[0].item()], [i], win='x_scale', update='append', name=self.name[j])
-                        # self.viz.line([j_bmove[1].item()], [i], win='y_scale', update='append', name=self.name[j])
-                        # self.viz.line([j_bmove[2].item()], [i], win='z_scale', update='append', name=self.name[j])
-                self.logger_count += 1
+                self.log_move(move)
                 # predict = self.mlp_time_prediction(cat_x)
                 # feat_times = torch.cat([static_feat, self.xyz_wrap.time_encoder(timestamps)], dim=-1)
                 # print(feat_times.shape)
