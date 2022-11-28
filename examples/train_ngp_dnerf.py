@@ -83,6 +83,45 @@ if __name__ == "__main__":
         action="store_true",
         help="whether to automatically compute the aabb",
     )
+    parser.add_argument(
+        '-f',
+        "--use_feat_predict",
+        action="store_true",
+        help="use a mlp to predict the hash feature",
+    )
+    parser.add_argument(
+        '-w',
+        "--use_weight_predict",
+        action="store_true",
+        help="use a mlp to predict the weight feature",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-2,
+    )
+    parser.add_argument(
+        '-d',
+        "--distortion_loss",
+        action="store_true",
+        help="use a distortion loss",
+    )
+    parser.add_argument(
+        "--rec_loss",
+        type=str,
+        default="huber",
+        choices=[
+            "huber",
+            "mse",
+            "smooth_l1",
+        ],
+    )
+    parser.add_argument(
+        '-o',
+        "--use_opacity_loss",
+        action="store_true",
+        help="use a opacity loss",
+    )
     parser.add_argument("--cone_angle", type=float, default=0.0)
     args = parser.parse_args()
 
@@ -163,7 +202,7 @@ if __name__ == "__main__":
             / render_n_samples
         ).item()
         alpha_thre = 0.0
-
+    
     # setup the radiance field we want to train.
     max_steps = 20000
     grad_scaler = torch.cuda.amp.GradScaler(2**10)
@@ -175,9 +214,12 @@ if __name__ == "__main__":
         logger=viz,
         aabb=args.aabb,
         unbounded=args.unbounded,
+        use_feat_predict=args.use_feat_predict,
+        use_weight_predict=args.use_weight_predict,
     ).to(device)
+    lr = args.lr
     optimizer = torch.optim.Adam(
-        radiance_field.parameters(), lr=1e-2, eps=1e-15
+        radiance_field.parameters(), lr=lr, eps=1e-15
     )
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
@@ -190,7 +232,28 @@ if __name__ == "__main__":
         resolution=grid_resolution,
         contraction_type=contraction_type,
     ).to(device)
-    
+
+
+    # generate log fir for test image and psnr
+    feat_dir = 'pf' if args.use_feat_predict else 'nopf'
+    if args.use_weight_predict:
+        feat_dir += '_pw'
+    else:
+        feat_dir += '_nopw'
+
+    if args.rec_loss == 'huber':
+        rec_loss_fn = F.huber_loss
+        feat_dir += '_l-huber'
+    elif args.rec_loss == 'mse':
+        rec_loss_fn = F.mse_loss
+        feat_dir += '_l-mse'
+    else:
+        feat_dir += '_l-sml1'
+        rec_loss_fn = F.smooth_l1_loss
+
+    if args.distortion_loss:
+        feat_dir += "_distor"
+
 
     # training
     step = 0
@@ -237,86 +300,130 @@ if __name__ == "__main__":
             occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
 
             # render
-            # with torch.autocast(device_type='cuda', dtype=torch.float16):
-            rgb, acc, depth, n_rendering_samples, extra = custom_render_image(
-                radiance_field,
-                occupancy_grid,
-                rays,
-                scene_aabb,
-                # rendering options
-                near_plane=near_plane,
-                far_plane=far_plane,
-                render_step_size=render_step_size,
-                render_bkgd=render_bkgd,
-                cone_angle=args.cone_angle,
-                alpha_thre=alpha_thre,
-                timestamps=timestamps,
-            )
-            if n_rendering_samples == 0:
-                continue
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                rgb, acc, depth, move_norm, n_rendering_samples, extra, extra_info = custom_render_image(
+                    radiance_field,
+                    occupancy_grid,
+                    rays,
+                    scene_aabb,
+                    # rendering options
+                    near_plane=near_plane,
+                    far_plane=far_plane,
+                    render_step_size=render_step_size,
+                    render_bkgd=render_bkgd,
+                    cone_angle=args.cone_angle,
+                    alpha_thre=alpha_thre,
+                    timestamps=timestamps,
+                )
+                if n_rendering_samples == 0:
+                    continue
 
-            # dynamic batch size for rays to keep sample batch size constant.
-            num_rays = len(pixels)
-            num_rays = int(
-                num_rays
-                * (target_sample_batch_size / float(n_rendering_samples))
-            )
-            train_dataset.update_num_rays(num_rays)
-            alive_ray_mask = acc.squeeze(-1) > 0
+                # dynamic batch size for rays to keep sample batch size constant.
+                num_rays = len(pixels)
+                num_rays = int(
+                    num_rays
+                    * (target_sample_batch_size / float(n_rendering_samples))
+                )
+                train_dataset.update_num_rays(num_rays)
+                alive_ray_mask = acc.squeeze(-1) > 0
 
-            # compute loss
+                # compute loss
 
-            # grid_feat = radiance_field.get_grid()
-            # tv = total_variation_loss(grid_feat.view(64, 64, 64, -1))
+                # grid_feat = radiance_field.get_grid()
+                # tv = total_variation_loss(grid_feat.view(64, 64, 64, -1))
 
-            # loss_times = F.smooth_l1_loss(times_acc[alive_ray_mask], timestamps[alive_ray_mask])
-            o = acc[alive_ray_mask]
-            loss_o = (-o*torch.log(o)).mean()*1e-2 
-            loss_extra = (extra[0][alive_ray_mask]).mean()*1e-1
-            # loss_distor = (extra[1][alive_ray_mask] * 0.01).mean()
-            # for k in extra:
-            #     loss_extra += (k[alive_ray_mask]*0.01).mean()
-            rec_loss = F.smooth_l1_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
-            loss = rec_loss + loss_o + loss_extra
+                # loss_times = F.smooth_l1_loss(times_acc[alive_ray_mask], timestamps[alive_ray_mask])
+                # loss_extra = (extra[0][alive_ray_mask]).mean()*1e-1
+                # loss_distor = (extra[1][alive_ray_mask] * 0.01).mean()
+                # for k in extra:
+                #     loss_extra += (k[alive_ray_mask]*0.01).mean()
 
-            # loss_extra = 0.
-            # # loss_distor = 0.
-            # for (predict, hash_feat, weight, t_starts, t_ends, ray_indices, packed_info) in extra:
-            #     alive_samples_mask = alive_ray_mask[ray_indices.long()]
-            #     loss_extra += F.smooth_l1_loss(predict[alive_samples_mask], hash_feat[alive_samples_mask])*0.1
-            #     # loss_distor += distortion(packed_info, weight, t_starts, t_ends).mean() * 0.01
-            
-            # loss += loss_extra
-                # loss += loss_distor
+                rec_loss = rec_loss_fn(rgb[alive_ray_mask], pixels[alive_ray_mask], reduction='none')
+
+                al_move_norm = move_norm[alive_ray_mask]
+                if not al_move_norm.size(0) == 0:
+                    # al_move_norm -= al_move_norm.min(0, keepdim=True)[0]
+                    # al_move_norm /= al_move_norm.max(0, keepdim=True)[0]
+                    rec_loss *= al_move_norm.detach()
+                    
+                loss = rec_loss.mean()
+
+                if args.use_opacity_loss:
+                    o = acc[alive_ray_mask]
+                    loss_o = (-o*torch.log(o)).mean()*1e-2
+                    loss += loss_o
+
+                if args.use_feat_predict:
+                    loss_extra = (extra[0][alive_ray_mask]).mean()*1e-1
+                    loss += loss_extra
+                else:
+                    loss_extra = 0.
+
+                if args.use_weight_predict:
+                    loss_weight = (extra[1][alive_ray_mask]).mean()*1e-2
+                    loss += loss_weight
+                else:
+                    loss_weight = 0.
+
+                if args.distortion_loss:
+                    loss_distor = 0.
+                    for (weight, t_starts, t_ends, ray_indices, packed_info) in extra_info:
+                        alive_samples_mask = alive_ray_mask[ray_indices.long()]
+                        # loss_extra += F.smooth_l1_loss(predict[alive_samples_mask], hash_feat[alive_samples_mask])*0.1
+                        loss_distor += distortion(packed_info, weight, t_starts, t_ends)[alive_ray_mask].mean() * 1e-2 
+                
+                    loss += loss_distor
 
             optimizer.zero_grad()
             # do not unscale it because we are using Adam.
             grad_scaler.scale(loss).backward()
-            optimizer.step()
-            # grad_scaler.step(optimizer)
-            scheduler.step()
+            # grad_scaler.unscale_(optimizer)
+            if args.use_feat_predict or args.use_weight_predict:
+                radiance_field.log_grad(step)
+            # optimizer.step()
+            grad_scaler.step(optimizer)
+            scale = grad_scaler.get_scale()
+            grad_scaler.update()
 
-            # grad_scaler.update()
+            if not scale > grad_scaler.get_scale():
+                scheduler.step()
+
+            # scheduler.step()
 
             if step % 1000 == 0:
                 elapsed_time = time.time() - tic
                 loss = F.mse_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
+                loss_log = f"loss={loss:.5f} | "
+                if args.use_feat_predict:
+                    loss_log += f"extra={loss_extra:.7f} | "
+                if args.use_weight_predict:
+                    loss_log += f"weight={loss_weight:.7f} | "
+                if args.distortion_loss:
+                     loss_log += f"distor={loss_distor:.7f} | "
+                if args.use_opacity_loss:
+                    loss_log += f"opac={loss_o:.7f} ||"
                 print(
-                    f"elapsed_time={elapsed_time:.2f}s | step={step} | "
-                    f"loss={loss:.5f} | " f"loss_extra={loss_extra:.7f} | "
+                    f"elapsed_time={elapsed_time:.2f}s | step={step} ||",
+                    loss_log,
                     f"alive_ray_mask={alive_ray_mask.long().sum():d} | "
                     f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} |"
                 )
 
             if step >= 0 and step % max_steps == 0 and step > 0:
-               # save the model
+                str_lr = str(lr).replace('.', '-')
+                # save the model
                 os.makedirs(f'{results_root}/checkpoints', exist_ok=True)
                 torch.save(
-                    radiance_field.state_dict(),
-                    f"{results_root}/checkpoints/ngp_dnerf_{args.scene}_{step}.pth",
+                    {
+                        "radiance_field": radiance_field.state_dict(),
+                        "occupancy_grid": occupancy_grid.state_dict(),
+                    },
+                    f"{results_root}/checkpoints/ngp_dnerf_lr_{str_lr}_{feat_dir}_{args.scene}_{step}.pth",
                 )
                 # evaluation
                 radiance_field.eval()
+                image_root = f'{results_root}/ngp_dnerf/{args.scene}/lr_{str_lr}/{feat_dir}'
+                print('image_root: ', image_root)
 
                 with torch.no_grad():
                     psnrs = []
@@ -348,22 +455,31 @@ if __name__ == "__main__":
                         mse = F.mse_loss(rgb, pixels)
                         psnr = -10.0 * torch.log(mse) / np.log(10.0)
                         psnrs.append(psnr.item())
-                        os.makedirs(f'{results_root}/ngp_dnerf/{args.scene}/train', exist_ok=True)
+
+                        os.makedirs(f'{image_root}/train', exist_ok=True)
+                        assert os.path.exists(f'{image_root}/train'), f"train images saving path dose not exits! path: {image_root}/train"
+
                         imageio.imwrite(
-                            f"{results_root}/ngp_dnerf/{args.scene}/train/acc_{i}.png",
+                            f"{image_root}/train/acc_{i}.png",
                             ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
                         )
                         imageio.imwrite(
-                            f"{results_root}/ngp_dnerf/{args.scene}/train/depth_{i}.png",
+                            f"{image_root}/train/depth_{i}.png",
                             (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
                         )
                         imageio.imwrite(
-                            f"{results_root}/ngp_dnerf/{args.scene}/train/rgb_{i}.png",
+                            f"{image_root}/train/rgb_{i}.png",
                             (rgb.cpu().numpy() * 255).astype(np.uint8),
                         )
                         # break
                     psnr_avg = sum(psnrs) / len(psnrs)
                     print(f"evaluation: psnr_avg={psnr_avg}")
+
+                    metrics_file = f"{image_root}/train/psnr.txt"
+                    psnr_str = [f'{p:.5f}\n' for p in psnrs] + [f'mean: {psnr_avg}']
+                    with open(metrics_file, 'w') as f:
+                        f.writelines(psnr_str)
+
                     psnrs = []
                     for i in tqdm.tqdm(range(len(test_dataset))):
                         data = test_dataset[i]
@@ -392,21 +508,29 @@ if __name__ == "__main__":
                         mse = F.mse_loss(rgb, pixels)
                         psnr = -10.0 * torch.log(mse) / np.log(10.0)
                         psnrs.append(psnr.item())
-                        os.makedirs(f'{results_root}/ngp_dnerf/{args.scene}', exist_ok=True)
+
+                        os.makedirs(f'{image_root}', exist_ok=True)
+                        assert os.path.exists(f'{image_root}'), f"test images saving path dose not exits! path: {image_root}"
+
                         imageio.imwrite(
-                            f"{results_root}/ngp_dnerf/{args.scene}/acc_{i}.png",
+                            f"{image_root}/acc_{i}.png",
                             ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
                         )
                         imageio.imwrite(
-                            f"{results_root}/ngp_dnerf/{args.scene}/depth_{i}.png",
+                            f"{image_root}/depth_{i}.png",
                             (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
                         )
                         imageio.imwrite(
-                            f"{results_root}/ngp_dnerf/{args.scene}/rgb_{i}.png",
+                            f"{image_root}/rgb_{i}.png",
                             (rgb.cpu().numpy() * 255).astype(np.uint8),
                         )
                     psnr_avg = sum(psnrs) / len(psnrs)
                     print(f"evaluation: psnr_avg={psnr_avg}")
+
+                    metrics_file = f"{image_root}/psnr.txt"
+                    psnr_str = [f'{p:.5f}\n' for p in psnrs] + [f'mean: {psnr_avg}']
+                    with open(metrics_file, 'w') as f:
+                        f.writelines(psnr_str)
 
                 # psnr_avg = sum(psnrs) / len(psnrs)
                 # print(f"evaluation: psnr_avg={psnr_avg}")

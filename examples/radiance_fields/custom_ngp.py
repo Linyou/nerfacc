@@ -138,6 +138,8 @@ class NGPDradianceField(NGPradianceField):
         geo_feat_dim: int = 15,
         n_levels: int = 16,
         log2_hashmap_size: int = 19,
+        use_feat_predict: bool = False,
+        use_weight_predict: bool = False,
     ) -> None:
         super().__init__(
             aabb, 
@@ -149,6 +151,9 @@ class NGPDradianceField(NGPradianceField):
             n_levels, 
             log2_hashmap_size
         )
+
+        self.use_feat_predict = use_feat_predict
+        self.use_weight_predict = use_weight_predict
         # self.aabb = self.aabb.to(torch.float16)
         # b = np.exp(np.log(1024/16)/(n_levels-1))
         # per_level_scale = b
@@ -201,7 +206,7 @@ class NGPDradianceField(NGPradianceField):
         )
 
         self.mlp_base = tcnn.Network(
-            n_input_dims=32,
+            n_input_dims=64,
             n_output_dims=1 + self.geo_feat_dim,
             network_config={
                 "otype": "FullyFusedMLP",
@@ -212,37 +217,65 @@ class NGPDradianceField(NGPradianceField):
             },
         )
 
-        # self.mlp_ill = tcnn.Network(
-        #     n_input_dims=self.geo_feat_dim+self.time_encoder.latent_dim,
-        #     n_output_dims=self.geo_feat_dim,
-        #     network_config={
-        #         "otype": "FullyFusedMLP",
-        #         "activation": "ReLU",
-        #         "output_activation": "None",
-        #         "n_neurons": 64,
-        #         "n_hidden_layers": 1,
-        #     },
-        # )
-
-        # self.mlp_feat_prediction = tcnn.Network(
-        #     n_input_dims=self.posi_encoder.latent_dim + self.time_encoder.latent_dim,
-        #     n_output_dims=32,
-        #     network_config={
-        #         "otype": "FullyFusedMLP",
-        #         "activation": "ReLU",
-        #         "output_activation": "None",
-        #         "n_neurons": 64,
-        #         "n_hidden_layers": 2,
-        #     },
-        # )
-
-        self.mlp_feat_prediction = MLP(
-            input_dim=self.posi_encoder.latent_dim + self.time_encoder.latent_dim,
-            output_dim=32,
-            net_depth=1,
-            net_width=64,
-            output_init=functools.partial(torch.nn.init.uniform_, b=1e-4),
+        self.mlp_time = tcnn.Network(
+            n_input_dims=self.time_encoder.latent_dim,
+            n_output_dims=32,
+            network_config={
+                "otype": "FullyFusedMLP",
+                "activation": "ReLU",
+                "output_activation": "None",
+                "n_neurons": 64,
+                "n_hidden_layers": 1,
+            },
         )
+
+        if self.use_feat_predict:
+            # self.mlp_feat_prediction = tcnn.Network(
+            #     n_input_dims=self.posi_encoder.latent_dim + self.time_encoder.latent_dim,
+            #     n_output_dims=32,
+            #     network_config={
+            #         "otype": "FullyFusedMLP",
+            #         "activation": "ReLU",
+            #         "output_activation": "None",
+            #         "n_neurons": 64,
+            #         "n_hidden_layers": 1,
+            #     },
+            # )
+            self.mlp_feat_prediction = MLP(
+                input_dim=self.posi_encoder.latent_dim + self.time_encoder.latent_dim,
+                output_dim=32,
+                net_depth=1,
+                net_width=64,
+                output_init=functools.partial(torch.nn.init.uniform_, b=1e-4),
+            )
+
+        if self.use_weight_predict:
+            self.mlp_time_to_weight = tcnn.Network(
+                n_input_dims=self.posi_encoder.latent_dim + self.time_encoder.latent_dim,
+                n_output_dims=1,
+                network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": 64,
+                    "n_hidden_layers": 1,
+                },
+            )
+            # self.mlp_time_to_weight = MLP(
+            #     input_dim=self.posi_encoder.latent_dim + self.time_encoder.latent_dim,
+            #     output_dim=1,
+            #     net_depth=1,
+            #     net_width=64,
+            #     output_init=functools.partial(torch.nn.init.uniform_, b=1e-4),
+            # )
+
+        # self.mlp_time_to_weight = MLP(
+        #     input_dim=self.posi_encoder.latent_dim + self.time_encoder.latent_dim,
+        #     output_dim=1,
+        #     net_depth=1,
+        #     net_width=64,
+        #     output_init=functools.partial(torch.nn.init.uniform_, b=1e-4),
+        # )
         
 
         # self.mlp_time_to_density = tcnn.Network(
@@ -299,24 +332,39 @@ class NGPDradianceField(NGPradianceField):
 
         self.viz = logger
         self.logger_count = 1
-        self.viz.line([0.], [0.], win='move_mean', opts=dict(title='move_mean', legend=['x', 'y', 'z']))
-        self.viz.line([0.], [0.], win='move_min', opts=dict(title='move_min', legend=['x', 'y', 'z']))
-        self.viz.line([0.], [0.], win='move_max', opts=dict(title='move_max', legend=['x', 'y', 'z']))
+
+        self.name = ['x', 'y', 'z']
+        self.grad_name = ['mean', 'min', 'max']
+
+        self.viz.line([0.], [0.], win='move_mean', opts=dict(title='move_mean', legend=self.name ))
+        self.viz.line([0.], [0.], win='move_min', opts=dict(title='move_min', legend=self.name ))
+        self.viz.line([0.], [0.], win='move_max', opts=dict(title='move_max', legend=self.name ))
+        self.viz.line([0.], [0.], win='move_norm', opts=dict(title='move_norm'))
+
+        self.viz.line([0.], [0.], win='grad_feat_predict', opts=dict(title='grad_feat_predict', legend=self.grad_name))
+        self.viz.line([0.], [0.], win='grad_feat_predict', opts=dict(title='grad_feat_predict', legend=self.grad_name))
+        self.viz.line([0.], [0.], win='grad_feat_predict', opts=dict(title='grad_feat_predict', legend=self.grad_name))
+    
+        self.viz.line([0.], [0.], win='grad_weight_predict', opts=dict(title='grad_weight_predict', legend=self.grad_name))
+        self.viz.line([0.], [0.], win='grad_weight_predict', opts=dict(title='grad_weight_predict', legend=self.grad_name))
+        self.viz.line([0.], [0.], win='grad_weight_predict', opts=dict(title='grad_weight_predict', legend=self.grad_name))
         # self.viz.line([0.], [0.], win='x_scale', opts=dict(title='x_scale', legend=['x', 'y', 'z']))
         # self.viz.line([0.], [0.], win='y_scale', opts=dict(title='y_scale', legend=['x', 'y', 'z']))
         # self.viz.line([0.], [0.], win='z_scale', opts=dict(title='z_scale', legend=['x', 'y', 'z']))
-        self.name = ['x', 'y', 'z']
 
     def log_move(self, move):
 
         if self.logger_count % 50 == 0:
             i = self.logger_count
             t_move = move
+            move_norm = move.norm(dim=-1)
             for j in range(3):
                 j_move = torch.abs(t_move[:, j])
                 self.viz.line([torch.mean(j_move).item()], [i], win='move_mean', update='append', name=self.name[j])
                 self.viz.line([torch.min(j_move).item()], [i], win='move_min', update='append', name=self.name[j])
                 self.viz.line([torch.max(j_move).item()], [i], win='move_max', update='append', name=self.name[j])
+                
+            self.viz.line([torch.mean(move_norm).item()], [i], win='move_norm', update='append')
                 # j_bmove = self.xyz_scale
                 # self.viz.line([j_bmove[0].item()], [i], win='x_scale', update='append', name=self.name[j])
                 # self.viz.line([j_bmove[1].item()], [i], win='y_scale', update='append', name=self.name[j])
@@ -325,12 +373,21 @@ class NGPDradianceField(NGPradianceField):
 
     def log_grad(self, step):
         if step % 50 == 0:
-            parameters_grad = [p.grad.reshape(-1) for p in self.mlp_feat_prediction.parameters()]
-            grad = torch.cat(parameters_grad, dim=-1)
+            if self.use_feat_predict:
+                parameters_grad = [p.grad.reshape(-1) for p in self.mlp_feat_prediction.parameters()]
+                grad = torch.cat(parameters_grad, dim=-1)
+                data_info = [torch.mean(grad).item(), torch.min(grad).item(), torch.max(grad).item()]
 
-            self.viz.line([torch.mean(grad).item()], [step], win='grad_feat_predict_mean', update='append')
-            self.viz.line([torch.min(grad).item()], [step], win='grad_feat_predict_min', update='append')
-            self.viz.line([torch.max(grad).item()], [step], win='grad_feat_predict_max', update='append')
+                for j in range(3):
+                    self.viz.line([data_info[j]], [step], win='grad_feat_predict', update='append', name=self.grad_name[j])
+
+            if self.use_weight_predict:
+                parameters_grad = [p.grad.reshape(-1) for p in self.mlp_time_to_weight.parameters()]
+                grad = torch.cat(parameters_grad, dim=-1)
+                data_info = [torch.mean(grad).item(), torch.min(grad).item(), torch.max(grad).item()]
+
+                for j in range(3):
+                    self.viz.line([data_info[j]], [step], win='grad_weight_predict', update='append', name=self.grad_name[j])
 
     def query_density(self, x, timestamps, return_feat: bool = False, dir: torch.Tensor = None):
         # move = self.xyz_wrap(x, timestamps).detach()
@@ -341,7 +398,7 @@ class NGPDradianceField(NGPradianceField):
         # x = x.to(torch.float16)
         # timestamps = timestamps.to(torch.float16)
         move = self.xyz_wrap(x, timestamps, self.aabb)*1e-2
-        move = torch.clamp(move, -1.5, 1.5)
+        # move = torch.clamp(move, -1.5, 1.5)
         x_move = x + move#+ torch.randn_like(move[:, :1])*0.001
         # x_move = x_move + self.mlp_fine(x_move)
 
@@ -360,22 +417,14 @@ class NGPDradianceField(NGPradianceField):
         # dynimic_feat_delta = self.posi_encoder(move)
         # dynimic_feat_p = self.posi_encoder(x.view(-1, self.num_dim) + move)
         # print(move_norm.shape)
-        # move_norm = move.norm(dim=-1)
-        # cat_x = torch.cat([static_feat, feat], dim=-1)
-        # times = self.mlp_time_prediction(static_feat)
-        # move_max = move.max(dim=-1)[0][:, None]
-        # cat_x = static_feat*(1.-move_max) + move_max*move_feat
+        move_norm = move.norm(dim=-1)
         time_encode = self.time_encoder(timestamps)
-
-        temp_feat = torch.cat([self.posi_encoder(x_move), time_encode], dim=-1)
-
-        # print(temp_feat.dtype)
-        if not temp_feat.size(0) == 0:
-            predict = self.mlp_feat_prediction(temp_feat)
+        if not time_encode.size(0) == 0:
+            t_feat = self.mlp_time(time_encode)
         else:
-            predict = torch.zeros_like(static_feat)
+            t_feat = torch.zeros_like(static_feat)
+        cat_x = torch.cat([static_feat, t_feat], dim=-1)
 
-        cat_x = (static_feat + predict) / 2
         x = (
             self.mlp_base(cat_x)
             .view(list(x.shape[:-1]) + [1 + self.geo_feat_dim])
@@ -388,9 +437,6 @@ class NGPDradianceField(NGPradianceField):
             self.density_activation(density_before_activation)
             * selector[..., None]
         )
-        # base_mlp_out = self.mlp_ill(torch.cat([base_mlp_out, time_encode], dim=-1))
-        # times = self.mlp_time_prediction(base_mlp_out)
-        # loss_times = F.smooth_l1_loss(times, timestamps, reduction='none') * selector[..., None]
 
         if return_feat:
             if self.training:
@@ -400,8 +446,27 @@ class NGPDradianceField(NGPradianceField):
                 # print(feat_times.shape)
                 # predict_density = self.mlp_time_to_density(feat_times)
                 # target = torch.cat([timestamps, x_move, move], dim=-1)
-                loss_times = F.smooth_l1_loss(predict, static_feat, reduction='none') * selector[..., None]
-                return density, base_mlp_out, (loss_times, )
+                
+                temp_feat = torch.cat([self.posi_encoder(x_move), time_encode], dim=-1)
+
+                if self.use_feat_predict:
+                    if not x_move.size(0) == 0:
+                        predict = self.mlp_feat_prediction(temp_feat)
+                    else:
+                        predict = torch.zeros_like(static_feat)
+                    loss_times = F.huber_loss(predict, static_feat, reduction='none') * selector[..., None]
+                else:
+                    loss_times = None
+
+                if self.use_weight_predict:
+                    if not x_move.size(0) == 0:
+                        predict_weight = self.mlp_time_to_weight(temp_feat)
+                    else:
+                        predict_weight = torch.zeros_like(density)
+                else:
+                    predict_weight = None
+
+                return density, base_mlp_out, [loss_times, predict_weight, selector, move_norm]
                 # loss_density = F.smooth_l1_loss(predict_density, density, reduction='none')
             else:
                 return density, base_mlp_out
@@ -424,10 +489,10 @@ class NGPDradianceField(NGPradianceField):
                 positions.shape == directions.shape
             ), f"{positions.shape} v.s. {directions.shape}"
             if self.training:
-                density, embedding, extra = self.query_density(positions, timestamps, return_feat=True)
+                density, embedding, extra = self.query_density(positions, timestamps, dir=directions, return_feat=True)
                 rgb = self._query_rgb(directions, embedding=embedding)
                 return rgb, density, extra
             else:
-                density, embedding = self.query_density(positions, timestamps, return_feat=True)
+                density, embedding = self.query_density(positions, timestamps, dir=directions, return_feat=True)
                 rgb = self._query_rgb(directions, embedding=embedding)
                 return rgb, density

@@ -334,6 +334,7 @@ def render_weight_from_density(
     packed_info: Optional[torch.Tensor] = None,
     ray_indices: Optional[torch.Tensor] = None,
     n_rays: Optional[int] = None,
+    return_trans: Optional[bool] = False,
 ) -> torch.Tensor:
     """Compute rendering weights :math:`w_i` from density :math:`\\sigma_i` and interval :math:`\\delta_i`.
     
@@ -387,6 +388,9 @@ def render_weight_from_density(
         )
         alphas = 1.0 - torch.exp(-sigmas * (t_ends - t_starts))
         weights = transmittance * alphas
+        
+        if return_trans:
+            return weights, alphas
     else:
         if packed_info is None:
             packed_info = pack_info(ray_indices, n_rays=n_rays)

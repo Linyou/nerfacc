@@ -85,7 +85,7 @@ class MLP(nn.Module):
 
             self.output_layer.apply(init_func_output)
 
-    @autocast()
+    @autocast(dtype=torch.float32)
     def forward(self, x):
         inputs = x
         for i in range(self.net_depth):

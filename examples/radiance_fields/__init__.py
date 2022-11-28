@@ -1,0 +1,1 @@
+from .ngp import trunc_exp
