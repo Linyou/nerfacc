@@ -71,6 +71,46 @@ def reduce_along_rays(
     outputs.scatter_reduce_(0, index, src, reduce="mean")
     return outputs
 
+def accumulate_along_rays_no_weight(
+    ray_indices: Tensor,
+    values: Tensor,
+    n_rays: Optional[int] = None,
+) -> Tensor:
+    """Accumulate volumetric values along the ray.
+
+    Note:
+        This function is only differentiable to `weights` and `values`.
+
+    Args:
+        weights: Volumetric rendering weights for those samples. Tensor with shape \
+            (n_samples,).
+        ray_indices: Ray index of each sample. IntTensor with shape (n_samples).
+        values: The values to be accmulated. Tensor with shape (n_samples, D). If \
+            None, the accumulated values are just weights. Default is None.
+        n_rays: Total number of rays. This will decide the shape of the ouputs. If \
+            None, it will be inferred from `ray_indices.max() + 1`.  If specified \
+            it should be at least larger than `ray_indices.max()`. Default is None.
+
+    Returns:
+        Accumulated values with shape (n_rays, D). If `values` is not given then we return \
+            the accumulated weights, in which case D == 1.
+
+    """
+    assert ray_indices.dim() == 1
+
+    if ray_indices.numel() == 0:
+        assert n_rays is not None
+        return torch.zeros((n_rays, values.shape[-1]), device=values.device)
+
+    if n_rays is None:
+        n_rays = int(ray_indices.max()) + 1
+    # assert n_rays > ray_indices.max()
+
+    ray_indices = ray_indices.int()
+    index = ray_indices[:, None].long().expand(-1, values.shape[-1])
+    outputs = torch.zeros((n_rays, values.shape[-1]), device=values.device)
+    outputs.scatter_add_(0, index, values)
+    return outputs
 
 def custom_rendering(
     # ray marching results
@@ -156,6 +196,27 @@ def custom_rendering(
             n_rays=n_rays,
         )
 
+
+    extra_reduce = []
+    feat_loss, p_weight, selector, move_norm = extra
+
+    # move_norm_view = move_norm[:, None]
+    w_dim = sigmas.dim()
+    m_dim = move_norm.dim()
+    assert w_dim == m_dim, f"sigmas: {w_dim} and move :{m_dim} not equal!"
+
+    with torch.no_grad():
+        render_move = render_weight_from_density(
+            t_starts,
+            t_ends,
+            move_norm,
+            ray_indices=ray_indices,
+            n_rays=n_rays
+        )
+        final_move = accumulate_along_rays(
+            render_move, ray_indices, values=None, n_rays=n_rays
+        )
+
     # Rendering: accumulate rgbs, opacities, and depths along the rays.
     colors = accumulate_along_rays(
         weights, ray_indices, values=rgbs, n_rays=n_rays
@@ -169,16 +230,9 @@ def custom_rendering(
         values=(t_starts + t_ends) / 2.0,
         n_rays=n_rays,
     )
-    
-    extra_reduce = []
-    feat_loss, p_weight, selector, move_norm = extra
-
-    move_norm_render = accumulate_along_rays(
-        weights, ray_indices, values=move_norm.unsqueeze(-1), n_rays=n_rays
-    )
-    print(move_norm_render.max())
-    print(move_norm_render.min())
-    print(move_norm_render.mean())
+    # move_norm_render = accumulate_along_rays(
+    #     weights.detach(), ray_indices, values=move_norm.unsqueeze(-1), n_rays=n_rays
+    # )*10
 
     if feat_loss is not None:
         extra_reduce.append(
@@ -186,7 +240,7 @@ def custom_rendering(
                 ray_indices,
                 values=feat_loss,
                 n_rays=n_rays,
-                weights=weights.detach(),
+                # weights=render_move,
             )
         )
     else:
@@ -199,18 +253,27 @@ def custom_rendering(
                 ray_indices,
                 values=weight_loss,
                 n_rays=n_rays,
-                weights=weights,
+                # weights=render_move,
             )
         ) 
     else:
         extra_reduce.append(None)
 
 
+    # extra_reduce.append(
+    #     reduce_along_rays(
+    #         ray_indices,
+    #         values=loss_times,
+    #         n_rays=n_rays,
+    #         weights=render_move,
+    #     )
+    # )
+
     # Background composition.
     if render_bkgd is not None:
         colors = colors + render_bkgd * (1.0 - opacities)
 
-    return colors, opacities, depths, weights, move_norm_render, extra_reduce
+    return colors, opacities, depths, final_move, weights, extra_reduce
 
 
 def custom_render_image(
@@ -295,7 +358,7 @@ def custom_render_image(
             cone_angle=cone_angle,
             alpha_thre=alpha_thre,
         )
-        rgb, opacity, depth, weight, move_norm_render, extra = custom_rendering(
+        rgb, opacity, depth, final_move, weight, extra = custom_rendering(
             t_starts,
             t_ends,
             ray_indices,
@@ -303,11 +366,11 @@ def custom_render_image(
             rgb_sigma_fn=rgb_sigma_fn,
             render_bkgd=render_bkgd,
         )
-        chunk_results = [rgb, opacity, depth, move_norm_render, len(t_starts)]
+        chunk_results = [rgb, opacity, depth, final_move, len(t_starts)]
         results.append(chunk_results)
         extra_results.append(extra)
         extra_info.append((weight, t_starts, t_ends, ray_indices, pack_info(ray_indices, chunk_rays.origins.shape[0])))
-    colors, opacities, depths, move_norms, n_rendering_samples = [
+    colors, opacities, depths, final_moves, n_rendering_samples = [
         torch.cat(r, dim=0) if isinstance(r[0], torch.Tensor) else r
         for r in zip(*results)
     ]
@@ -319,7 +382,7 @@ def custom_render_image(
         colors.view((*rays_shape[:-1], -1)),
         opacities.view((*rays_shape[:-1], -1)),
         depths.view((*rays_shape[:-1], -1)),
-        move_norms.view((*rays_shape[:-1], -1)),
+        final_moves.view((*rays_shape[:-1], -1)),
         sum(n_rendering_samples),
         extra,
         extra_info,

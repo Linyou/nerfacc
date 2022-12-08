@@ -224,6 +224,7 @@ if __name__ == "__main__":
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=[max_steps // 2, max_steps * 3 // 4, max_steps * 9 // 10],
+        # milestones=[max_steps // 2, max_steps * 9 // 10],
         gamma=0.33,
     )
 
@@ -258,6 +259,7 @@ if __name__ == "__main__":
     # training
     step = 0
     tic = time.time()
+    # radiance_field.loose_move = True
     for epoch in range(10000000):
         for i in range(len(train_dataset)):
             radiance_field.train()
@@ -301,20 +303,36 @@ if __name__ == "__main__":
 
             # render
             with torch.autocast(device_type='cuda', dtype=torch.float16):
-                rgb, acc, depth, move_norm, n_rendering_samples, extra, extra_info = custom_render_image(
-                    radiance_field,
-                    occupancy_grid,
-                    rays,
-                    scene_aabb,
-                    # rendering options
-                    near_plane=near_plane,
-                    far_plane=far_plane,
-                    render_step_size=render_step_size,
-                    render_bkgd=render_bkgd,
-                    cone_angle=args.cone_angle,
-                    alpha_thre=alpha_thre,
-                    timestamps=timestamps,
-                )
+                if args.use_feat_predict or args.use_weight_predict:
+                    rgb, acc, depth, move, n_rendering_samples, extra, extra_info = custom_render_image(
+                        radiance_field,
+                        occupancy_grid,
+                        rays,
+                        scene_aabb,
+                        # rendering options
+                        near_plane=near_plane,
+                        far_plane=far_plane,
+                        render_step_size=render_step_size,
+                        render_bkgd=render_bkgd,
+                        cone_angle=args.cone_angle,
+                        alpha_thre=alpha_thre,
+                        timestamps=timestamps,
+                    )
+                else:
+                    rgb, acc, depth, n_rendering_samples = render_image(
+                        radiance_field,
+                        occupancy_grid,
+                        rays,
+                        scene_aabb,
+                        # rendering options
+                        near_plane=near_plane,
+                        far_plane=far_plane,
+                        render_step_size=render_step_size,
+                        render_bkgd=render_bkgd,
+                        cone_angle=args.cone_angle,
+                        alpha_thre=alpha_thre,
+                        timestamps=timestamps,
+                    )
                 if n_rendering_samples == 0:
                     continue
 
@@ -339,12 +357,6 @@ if __name__ == "__main__":
                 #     loss_extra += (k[alive_ray_mask]*0.01).mean()
 
                 rec_loss = rec_loss_fn(rgb[alive_ray_mask], pixels[alive_ray_mask], reduction='none')
-
-                al_move_norm = move_norm[alive_ray_mask]
-                if not al_move_norm.size(0) == 0:
-                    # al_move_norm -= al_move_norm.min(0, keepdim=True)[0]
-                    # al_move_norm /= al_move_norm.max(0, keepdim=True)[0]
-                    rec_loss *= al_move_norm.detach()
                     
                 loss = rec_loss.mean()
 
@@ -360,10 +372,13 @@ if __name__ == "__main__":
                     loss_extra = 0.
 
                 if args.use_weight_predict:
-                    loss_weight = (extra[1][alive_ray_mask]).mean()*1e-2
+                    loss_weight = (extra[1][alive_ray_mask]).mean()*1e-1
                     loss += loss_weight
                 else:
                     loss_weight = 0.
+
+                # loss_time = (extra[2][alive_ray_mask]).mean()
+                # loss += loss_time
 
                 if args.distortion_loss:
                     loss_distor = 0.
@@ -396,6 +411,9 @@ if __name__ == "__main__":
                 loss_log = f"loss={loss:.5f} | "
                 if args.use_feat_predict:
                     loss_log += f"extra={loss_extra:.7f} | "
+
+                # loss_log += f"time={loss_time:.7f} | "
+
                 if args.use_weight_predict:
                     loss_log += f"weight={loss_weight:.7f} | "
                 if args.distortion_loss:
@@ -428,6 +446,10 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     psnrs = []
                     print("save train image")
+
+                    os.makedirs(f'{image_root}/train', exist_ok=True)
+                    assert os.path.exists(f'{image_root}/train'), f"train images saving path dose not exits! path: {image_root}/train"
+
                     for i in tqdm.tqdm(range(len(train_dataset_test))):
                         data = train_dataset_test[i]
                         render_bkgd = data["color_bkgd"]
@@ -456,9 +478,6 @@ if __name__ == "__main__":
                         psnr = -10.0 * torch.log(mse) / np.log(10.0)
                         psnrs.append(psnr.item())
 
-                        os.makedirs(f'{image_root}/train', exist_ok=True)
-                        assert os.path.exists(f'{image_root}/train'), f"train images saving path dose not exits! path: {image_root}/train"
-
                         imageio.imwrite(
                             f"{image_root}/train/acc_{i}.png",
                             ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
@@ -480,6 +499,7 @@ if __name__ == "__main__":
                     with open(metrics_file, 'w') as f:
                         f.writelines(psnr_str)
 
+                    print('save test image')
                     psnrs = []
                     for i in tqdm.tqdm(range(len(test_dataset))):
                         data = test_dataset[i]
@@ -531,6 +551,51 @@ if __name__ == "__main__":
                     psnr_str = [f'{p:.5f}\n' for p in psnrs] + [f'mean: {psnr_avg}']
                     with open(metrics_file, 'w') as f:
                         f.writelines(psnr_str)
+
+                    print('save no move image')
+
+                    os.makedirs(f'{image_root}/no_move', exist_ok=True)
+                    assert os.path.exists(f'{image_root}/no_move'), f"test images saving path dose not exits! path: {image_root}/no_move"
+
+                    radiance_field.loose_move = True
+
+                    for i in tqdm.tqdm(range(len(test_dataset))):
+                        data = test_dataset[i]
+                        render_bkgd = data["color_bkgd"]
+                        rays = data["rays"]
+                        pixels = data["pixels"]
+                        timestamps = data["timestamps"]
+
+                        # rendering
+                        rgb, acc, depth, _, = render_image(
+                            radiance_field,
+                            occupancy_grid,
+                            rays,
+                            scene_aabb,
+                            # rendering options
+                            near_plane=near_plane,
+                            far_plane=far_plane,
+                            render_step_size=render_step_size,
+                            render_bkgd=render_bkgd,
+                            cone_angle=args.cone_angle,
+                            alpha_thre=alpha_thre,
+                            # test options
+                            test_chunk_size=args.test_chunk_size,
+                            timestamps=timestamps,
+                        )
+
+                        imageio.imwrite(
+                            f"{image_root}/no_move/acc_{i}.png",
+                            ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{image_root}/no_move/depth_{i}.png",
+                            (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{image_root}/no_move/rgb_{i}.png",
+                            (rgb.cpu().numpy() * 255).astype(np.uint8),
+                        )
 
                 # psnr_avg = sum(psnrs) / len(psnrs)
                 # print(f"evaluation: psnr_avg={psnr_avg}")
