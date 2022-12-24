@@ -225,7 +225,7 @@ if __name__ == "__main__":
                         mse = F.mse_loss(rgb, pixels)
                         psnr = -10.0 * torch.log(mse) / np.log(10.0)
                         psnrs.append(psnr.item())
-                        os.mkdir(f'{results_root}/mlp_dnerf/{args.scene}', exist_ok=True)
+                        os.makedirs(f'{results_root}/mlp_dnerf/{args.scene}', exist_ok=True)
                         imageio.imwrite(
                             f"{results_root}/mlp_dnerf/{args.scene}/acc_{i}.png",
                             ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
@@ -236,6 +236,50 @@ if __name__ == "__main__":
                         )
                         imageio.imwrite(
                             f"{results_root}/mlp_dnerf/{args.scene}/rgb_{i}.png",
+                            (rgb.cpu().numpy() * 255).astype(np.uint8),
+                        )
+
+                    radiance_field.loose_move = True
+                    print("test no move")
+                    for i in tqdm.tqdm(range(len(test_dataset))):
+                        data = test_dataset[i]
+                        render_bkgd = data["color_bkgd"]
+                        rays = data["rays"]
+                        pixels = data["pixels"]
+                        timestamps = data["timestamps"]
+
+                        # rendering
+                        rgb, acc, depth, _ = render_image(
+                            radiance_field,
+                            occupancy_grid,
+                            rays,
+                            scene_aabb,
+                            # rendering options
+                            near_plane=None,
+                            far_plane=None,
+                            render_step_size=render_step_size,
+                            render_bkgd=render_bkgd,
+                            cone_angle=args.cone_angle,
+                            alpha_thre=0.01,
+                            # test options
+                            test_chunk_size=args.test_chunk_size,
+                            # dnerf options
+                            timestamps=timestamps,
+                        )
+                        mse = F.mse_loss(rgb, pixels)
+                        psnr = -10.0 * torch.log(mse) / np.log(10.0)
+                        psnrs.append(psnr.item())
+                        os.makedirs(f'{results_root}/mlp_dnerf/{args.scene}/no_move', exist_ok=True)
+                        imageio.imwrite(
+                            f"{results_root}/mlp_dnerf/{args.scene}/no_move/acc_{i}.png",
+                            ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{results_root}/mlp_dnerf/{args.scene}/no_move/depth_{i}.png",
+                            (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{results_root}/mlp_dnerf/{args.scene}/no_move/rgb_{i}.png",
                             (rgb.cpu().numpy() * 255).astype(np.uint8),
                         )
                         # break

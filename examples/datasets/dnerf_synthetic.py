@@ -221,10 +221,12 @@ class SubjectLoader(torch.utils.data.Dataset):
         if self.training:
             origins = torch.reshape(origins, (num_rays, 3))
             viewdirs = torch.reshape(viewdirs, (num_rays, 3))
+            directions = torch.reshape(directions, (num_rays, 3))
             rgba = torch.reshape(rgba, (num_rays, 4))
         else:
             origins = torch.reshape(origins, (self.HEIGHT, self.WIDTH, 3))
             viewdirs = torch.reshape(viewdirs, (self.HEIGHT, self.WIDTH, 3))
+            directions = torch.reshape(directions, (self.HEIGHT, self.WIDTH, 3))
             rgba = torch.reshape(rgba, (self.HEIGHT, self.WIDTH, 4))
 
         rays = Rays(origins=origins, viewdirs=viewdirs)
@@ -234,4 +236,5 @@ class SubjectLoader(torch.utils.data.Dataset):
             "rgba": rgba,  # [h, w, 4] or [num_rays, 4]
             "rays": rays,  # [h, w, 3] or [num_rays, 3]
             "timestamps": timestamps,  # [num_rays, 1]
+            "idx": image_id,
         }

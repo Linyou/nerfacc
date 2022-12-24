@@ -1,9 +1,7 @@
 import taichi as ti
 import torch
 from torch import Tensor
-from torch.cuda.amp import custom_fwd, custom_bwd
 
-custom_type = torch.float32
 
 @ti.kernel
 def prefix_sums_kernel(
@@ -123,7 +121,6 @@ class DistortionLoss(torch.autograd.Function):
         loss: (N_rays)
     """
     @staticmethod
-    @custom_fwd(cast_inputs=custom_type)
     def forward(ctx, ws, interval, timd, packed_info):
         loss = torch.zeros(packed_info.size(0), dtype=ws.dtype, device=ws.device)
 
@@ -135,6 +132,11 @@ class DistortionLoss(torch.autograd.Function):
         _loss = torch.zeros_like(ws)
 
         wts = ws*timd
+
+        wts = wts.contiguous()
+        ws = ws.contiguous()
+        packed_info = packed_info.contiguous()
+        interval = interval.contiguous()
 
         prefix_sums_kernel(
             packed_info, ws, wts, 
@@ -162,7 +164,6 @@ class DistortionLoss(torch.autograd.Function):
         return loss
 
     @staticmethod
-    @custom_bwd
     def backward(ctx, dL_dloss):
         (ws_inclusive_scan, wts_inclusive_scan,
         ws, deltas, ts, rays_a) = ctx.saved_tensors
@@ -178,6 +179,7 @@ class DistortionLoss(torch.autograd.Function):
         return dL_dws, None, None, None
 
 
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def distortion(
     packed_info: Tensor, weights: Tensor, t_starts: Tensor, t_ends: Tensor
 ) -> Tensor:

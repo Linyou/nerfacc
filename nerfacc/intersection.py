@@ -11,6 +11,7 @@ import nerfacc.cuda as _C
 
 
 @torch.no_grad()
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def ray_aabb_intersect(
     rays_o: Tensor, rays_d: Tensor, aabb: Tensor
 ) -> Tuple[Tensor, Tensor]:

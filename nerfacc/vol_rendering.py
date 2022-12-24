@@ -11,9 +11,6 @@ import nerfacc.cuda as _C
 
 from .pack import pack_info
 import torch.nn.functional as F
-from torch.cuda.amp import custom_fwd, custom_bwd
-
-custom_type = torch.float32
 
 def rendering(
     # ray marching results
@@ -132,6 +129,7 @@ def rendering(
     return colors, opacities, depths
 
 
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def accumulate_along_rays(
     weights: Tensor,
     ray_indices: Tensor,
@@ -201,7 +199,7 @@ def accumulate_along_rays(
     return outputs
 
 
-
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def render_transmittance_from_density(
     t_starts: Tensor,
     t_ends: Tensor,
@@ -270,6 +268,7 @@ def render_transmittance_from_density(
     return transmittance
 
 
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def render_transmittance_from_alpha(
     alphas: Tensor,
     *,
@@ -327,6 +326,7 @@ def render_transmittance_from_alpha(
     return transmittance
 
 
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def render_weight_from_density(
     t_starts: Tensor,
     t_ends: Tensor,
@@ -401,6 +401,7 @@ def render_weight_from_density(
     return weights
 
 
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def render_weight_from_alpha(
     alphas: Tensor,
     *,
@@ -458,6 +459,7 @@ def render_weight_from_alpha(
 
 
 @torch.no_grad()
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def render_visibility(
     alphas: torch.Tensor,
     *,
@@ -532,7 +534,6 @@ class _RenderingTransmittanceFromDensityCUB(torch.autograd.Function):
     """Rendering transmittance from density with CUB implementation."""
 
     @staticmethod
-    @custom_fwd(cast_inputs=custom_type)
     def forward(ctx, ray_indices, t_starts, t_ends, sigmas):
         ray_indices = ray_indices.contiguous()
         t_starts = t_starts.contiguous()
@@ -546,7 +547,6 @@ class _RenderingTransmittanceFromDensityCUB(torch.autograd.Function):
         return transmittance
 
     @staticmethod
-    @custom_bwd
     def backward(ctx, transmittance_grads):
         transmittance_grads = transmittance_grads.contiguous()
         ray_indices, t_starts, t_ends, transmittance = ctx.saved_tensors
@@ -560,7 +560,6 @@ class _RenderingTransmittanceFromDensityNaive(torch.autograd.Function):
     """Rendering transmittance from density with naive forloop."""
 
     @staticmethod
-    @custom_fwd(cast_inputs=custom_type)
     def forward(ctx, packed_info, t_starts, t_ends, sigmas):
         packed_info = packed_info.contiguous()
         t_starts = t_starts.contiguous()
@@ -574,7 +573,6 @@ class _RenderingTransmittanceFromDensityNaive(torch.autograd.Function):
         return transmittance
 
     @staticmethod
-    @custom_bwd
     def backward(ctx, transmittance_grads):
         transmittance_grads = transmittance_grads.contiguous()
         packed_info, t_starts, t_ends, transmittance = ctx.saved_tensors
@@ -588,7 +586,6 @@ class _RenderingTransmittanceFromAlphaCUB(torch.autograd.Function):
     """Rendering transmittance from opacity with CUB implementation."""
 
     @staticmethod
-    @custom_fwd(cast_inputs=custom_type)
     def forward(ctx, ray_indices, alphas):
         ray_indices = ray_indices.contiguous()
         alphas = alphas.contiguous()
@@ -600,7 +597,6 @@ class _RenderingTransmittanceFromAlphaCUB(torch.autograd.Function):
         return transmittance
 
     @staticmethod
-    @custom_bwd
     def backward(ctx, transmittance_grads):
         transmittance_grads = transmittance_grads.contiguous()
         ray_indices, transmittance, alphas = ctx.saved_tensors
@@ -614,7 +610,6 @@ class _RenderingTransmittanceFromAlphaNaive(torch.autograd.Function):
     """Rendering transmittance from opacity with naive forloop."""
 
     @staticmethod
-    @custom_fwd(cast_inputs=custom_type)
     def forward(ctx, packed_info, alphas):
         packed_info = packed_info.contiguous()
         alphas = alphas.contiguous()
@@ -626,7 +621,6 @@ class _RenderingTransmittanceFromAlphaNaive(torch.autograd.Function):
         return transmittance
 
     @staticmethod
-    @custom_bwd
     def backward(ctx, transmittance_grads):
         transmittance_grads = transmittance_grads.contiguous()
         packed_info, transmittance, alphas = ctx.saved_tensors
@@ -640,7 +634,6 @@ class _RenderingWeightFromDensityNaive(torch.autograd.Function):
     """Rendering weight from density with naive forloop."""
 
     @staticmethod
-    @custom_fwd(cast_inputs=custom_type)
     def forward(ctx, packed_info, t_starts, t_ends, sigmas):
         packed_info = packed_info.contiguous()
         t_starts = t_starts.contiguous()
@@ -656,7 +649,6 @@ class _RenderingWeightFromDensityNaive(torch.autograd.Function):
         return weights
 
     @staticmethod
-    @custom_bwd
     def backward(ctx, grad_weights):
         grad_weights = grad_weights.contiguous()
         packed_info, t_starts, t_ends, sigmas, weights = ctx.saved_tensors
@@ -670,7 +662,6 @@ class _RenderingWeightFromAlphaNaive(torch.autograd.Function):
     """Rendering weight from opacity with naive forloop."""
 
     @staticmethod
-    @custom_fwd(cast_inputs=custom_type)
     def forward(ctx, packed_info, alphas):
         packed_info = packed_info.contiguous()
         alphas = alphas.contiguous()
@@ -680,7 +671,6 @@ class _RenderingWeightFromAlphaNaive(torch.autograd.Function):
         return weights
 
     @staticmethod
-    @custom_bwd
     def backward(ctx, grad_weights):
         grad_weights = grad_weights.contiguous()
         packed_info, alphas, weights = ctx.saved_tensors

@@ -6,6 +6,8 @@ import collections
 
 Rays = collections.namedtuple("Rays", ("origins", "viewdirs"))
 
+Rays_d = collections.namedtuple("Rays", ("origins", "viewdirs", "directions"))
+
 
 def namedtuple_map(fn, tup):
     """Apply `fn` to each element of `tup` and cast to `tup`'s namedtuple."""

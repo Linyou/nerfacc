@@ -20,7 +20,7 @@ from nerfacc import OccupancyGrid, ray_marching, rendering, pack_info, render_we
 
 from radiance_fields import trunc_exp
 
-
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def reduce_along_rays(
     ray_indices: Tensor,
     values: Tensor,
@@ -71,6 +71,7 @@ def reduce_along_rays(
     outputs.scatter_reduce_(0, index, src, reduce="mean")
     return outputs
 
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def accumulate_along_rays_no_weight(
     ray_indices: Tensor,
     values: Tensor,
@@ -198,24 +199,24 @@ def custom_rendering(
 
 
     extra_reduce = []
-    feat_loss, p_weight, selector, move_norm = extra
+    feat_loss, p_weight, selector = extra
 
     # move_norm_view = move_norm[:, None]
-    w_dim = sigmas.dim()
-    m_dim = move_norm.dim()
-    assert w_dim == m_dim, f"sigmas: {w_dim} and move :{m_dim} not equal!"
+    # w_dim = sigmas.dim()
+    # m_dim = move_norm.dim()
+    # assert w_dim == m_dim, f"sigmas: {w_dim} and move :{m_dim} not equal!"
 
-    with torch.no_grad():
-        render_move = render_weight_from_density(
-            t_starts,
-            t_ends,
-            move_norm,
-            ray_indices=ray_indices,
-            n_rays=n_rays
-        )
-        final_move = accumulate_along_rays(
-            render_move, ray_indices, values=None, n_rays=n_rays
-        )
+    # with torch.no_grad():
+    #     render_move = render_weight_from_density(
+    #         t_starts,
+    #         t_ends,
+    #         move_norm,
+    #         ray_indices=ray_indices,
+    #         n_rays=n_rays
+    #     )
+    #     final_move = accumulate_along_rays(
+    #         render_move, ray_indices, values=None, n_rays=n_rays
+    #     )
 
     # Rendering: accumulate rgbs, opacities, and depths along the rays.
     colors = accumulate_along_rays(
@@ -240,7 +241,7 @@ def custom_rendering(
                 ray_indices,
                 values=feat_loss,
                 n_rays=n_rays,
-                # weights=render_move,
+                weights=weights,
             )
         )
     else:
@@ -253,7 +254,7 @@ def custom_rendering(
                 ray_indices,
                 values=weight_loss,
                 n_rays=n_rays,
-                # weights=render_move,
+                weights=weights,
             )
         ) 
     else:
@@ -273,7 +274,7 @@ def custom_rendering(
     if render_bkgd is not None:
         colors = colors + render_bkgd * (1.0 - opacities)
 
-    return colors, opacities, depths, final_move, weights, extra_reduce
+    return colors, opacities, depths, selector, weights, extra_reduce
 
 
 def custom_render_image(
@@ -293,6 +294,7 @@ def custom_render_image(
     test_chunk_size: int = 8192,
     # only useful for dnerf
     timestamps: Optional[torch.Tensor] = None,
+    idx: Optional[torch.Tensor] = None,
 ):
     """Render the pixels of an image."""
     rays_shape = rays.origins.shape
@@ -332,7 +334,15 @@ def custom_render_image(
                 if radiance_field.training
                 else timestamps.expand_as(positions[:, :1])
             )
-            return radiance_field(positions, t, t_dirs)
+            if idx is not None:
+                idxx = (
+                    idx[ray_indices]
+                    if radiance_field.training
+                    else idxx.expand_as(positions[:, :1])   
+                )
+                return radiance_field(positions, t, t_dirs, idxx)
+            else:
+                return radiance_field(positions, t, t_dirs)
         return radiance_field(positions, t_dirs)
 
     results = []
@@ -358,6 +368,7 @@ def custom_render_image(
             cone_angle=cone_angle,
             alpha_thre=alpha_thre,
         )
+        # print(len(t_starts))
         rgb, opacity, depth, final_move, weight, extra = custom_rendering(
             t_starts,
             t_ends,
@@ -382,7 +393,7 @@ def custom_render_image(
         colors.view((*rays_shape[:-1], -1)),
         opacities.view((*rays_shape[:-1], -1)),
         depths.view((*rays_shape[:-1], -1)),
-        final_moves.view((*rays_shape[:-1], -1)),
+        final_moves,
         sum(n_rendering_samples),
         extra,
         extra_info,

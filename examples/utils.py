@@ -3,6 +3,7 @@ Copyright (c) 2022 Ruilong Li, UC Berkeley.
 """
 
 import random
+import argparse
 from typing import Optional
 
 import numpy as np
@@ -10,6 +11,109 @@ import torch
 from datasets.utils import Rays, namedtuple_map
 
 from nerfacc import OccupancyGrid, ray_marching, rendering
+
+
+def get_opts():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--train_split",
+        type=str,
+        default="trainval",
+        choices=["train", "trainval"],
+        help="which train split to use",
+    )
+    parser.add_argument(
+        "--scene",
+        type=str,
+        default="lego",
+        choices=[
+            # dnerf
+            "bouncingballs",
+            "hellwarrior",
+            "hook",
+            "jumpingjacks",
+            "lego",
+            "mutant",
+            "standup",
+            "trex",
+        ],
+        help="which scene to use",
+    )
+    parser.add_argument(
+        "--aabb",
+        type=lambda s: [float(item) for item in s.split(",")],
+        default="-1.5,-1.5,-1.5,1.5,1.5,1.5",
+        help="delimited list input",
+    )
+    parser.add_argument(
+        "--test_chunk_size",
+        type=int,
+        default=8192,
+    )
+    parser.add_argument(
+        "--unbounded",
+        action="store_true",
+        help="whether to use unbounded rendering",
+    )
+    parser.add_argument(
+        "--auto_aabb",
+        action="store_true",
+        help="whether to automatically compute the aabb",
+    )
+    parser.add_argument(
+        '-f',
+        "--use_feat_predict",
+        action="store_true",
+        help="use a mlp to predict the hash feature",
+    )
+    parser.add_argument(
+        '-w',
+        "--use_weight_predict",
+        action="store_true",
+        help="use a mlp to predict the weight feature",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-2,
+    )
+    parser.add_argument(
+        '-d',
+        "--distortion_loss",
+        action="store_true",
+        help="use a distortion loss",
+    )
+    parser.add_argument(
+        "--rec_loss",
+        type=str,
+        default="huber",
+        choices=[
+            "huber",
+            "mse",
+            "smooth_l1",
+        ],
+    )
+    parser.add_argument(
+        '-o',
+        "--use_opacity_loss",
+        action="store_true",
+        help="use a opacity loss",
+    )
+    parser.add_argument(
+        "--pretrained_model_path",
+        default="",
+    )
+
+    parser.add_argument(
+        "--test_print",
+        action="store_true",
+        help="run evaluation during training",
+    )
+    
+    parser.add_argument("--cone_angle", type=float, default=0.0)
+    args = parser.parse_args()
+
+    return args
 
 
 def set_random_seed(seed):

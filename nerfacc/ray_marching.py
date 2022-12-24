@@ -11,6 +11,7 @@ from .vol_rendering import render_visibility
 
 
 @torch.no_grad()
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def ray_marching(
     # rays
     rays_o: torch.Tensor,

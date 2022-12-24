@@ -16,6 +16,7 @@ from .contraction import ContractionType, contract_inv
 
 
 @torch.no_grad()
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def query_grid(
     samples: torch.Tensor,
     grid_roi: torch.Tensor,

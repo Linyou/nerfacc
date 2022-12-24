@@ -21,7 +21,6 @@ except ImportError as e:
     )
     exit()
 
-
 class SinusoidalEncoderWithExp(nn.Module):
     """Sinusoidal Positional Encoder used in Nerf."""
 
@@ -72,28 +71,88 @@ class CanonicalWarper(torch.nn.Module):
         num_dim: int = 3,
         n_levels: int = 16,
         log2_hashmap_size: int = 19,
+        moving_step: float = 1/1024,
     ) -> None:
         super().__init__()
         self.num_dim = num_dim
 
-        # constants
-        # b = np.exp(np.log(2048/16)/(n_levels-1))
-        # per_level_scale = b
         # per_level_scale = 1.3195079565048218
 
-        self.posi_encoder = SinusoidalEncoder(3, 0, 4, True)
+        self.sin_posi_encoder = SinusoidalEncoder(3, 0, 1, True)
         self.time_encoder = SinusoidalEncoder(1, 0, 4, True)
 
-        # self.posi_encoder = tcnn.Encoding(
-        #     n_input_dims=num_dim,
+        # self.xyz_scale = torch.nn.Parameter(torch.tensor([1e-1, ]))
+        # self.time_size = 200
+        # self.time_embedding = nn.Embedding(200, self.time_encoder.latent_dim)
+
+        self.MOVING_STEP = moving_step
+
+        self.posi_encoder = tcnn.NetworkWithInputEncoding(
+            n_input_dims=num_dim+1,
+            encoding_config={
+                "otype": "Frequency",
+                "n_frequencies": 4
+            },
+            n_output_dims=self.num_dim*2,
+            network_config={
+                "otype": "FullyFusedMLP",
+                "activation": "ReLU",
+                "output_activation": "None",
+                "n_neurons": 64,
+                "n_hidden_layers": 3,
+            },
+        )
+
+
+        # constants
+        # dst_res = 32
+        # base_res = 2
+        # b = np.exp(np.log(dst_res/base_res)/(n_levels-1))
+        # per_level_scale = b
+        # self.posi_encoder = tcnn.NetworkWithInputEncoding(
+        #     n_input_dims=num_dim+1,
         #     encoding_config={
         #         "otype": "HashGrid",
         #         "n_levels": n_levels,
         #         "n_features_per_level": 2,
         #         "log2_hashmap_size": log2_hashmap_size,
-        #         "base_resolution": 16,
+        #         "base_resolution": base_res,
+        #         "per_level_scale": per_level_scale,
+        #     },
+        #     n_output_dims=self.num_dim*2,
+        #     network_config={
+        #         "otype": "FullyFusedMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 64,
+        #         "n_hidden_layers": 1,
+        #     },
+        # )
+
+        # self.posi_encoder = tcnn.Encoding(
+        #     n_input_dims=num_dim+1,
+        #     encoding_config={
+        #         "otype": "HashGrid",
+        #         "n_levels": 4,
+        #         "n_features_per_level": 8,
+        #         "log2_hashmap_size": log2_hashmap_size,
+        #         "base_resolution": 2,
         #         "per_level_scale": per_level_scale,
         #     }
+        # )
+
+        # b = np.exp(np.log(256/2)/(n_levels-1))
+        # per_level_scale = b
+        # self.final_encoder = tcnn.Encoding(
+        #     n_input_dims=num_dim,
+        #     encoding_config={
+        #         "otype": "HashGrid",
+        #         "n_levels": 16,
+        #         "n_features_per_level": 2,
+        #         "log2_hashmap_size": log2_hashmap_size,
+        #         "base_resolution": 2,
+        #         "per_level_scale": per_level_scale,
+        #     },
         # )
         # self.posi_encoder = tcnn.Encoding(
         #     n_input_dims=num_dim,
@@ -109,43 +168,72 @@ class CanonicalWarper(torch.nn.Module):
         #         "n_frequencies": 4
         #     },
         # )
-        print("canonical out dim: ", self.posi_encoder.latent_dim)
+        print("canonical out dim: ", self.posi_encoder.n_output_dims)
         print("time out dim: ", self.time_encoder.latent_dim)
         # self.canonical_head = MLP(
+        #     input_dim=2,
+        #     output_dim=3,
+        #     net_depth=1,
+        #     net_width=16,
+        #     output_init=functools.partial(torch.nn.init.uniform_, b=1e-4),
+        # )
+        # self.fine_head = MLP(
         #     input_dim=self.posi_encoder.latent_dim+self.time_encoder.latent_dim,
         #     output_dim=3,
-        #     net_depth=2,
+        #     net_depth=1,
         #     net_width=64,
         #     output_init=functools.partial(torch.nn.init.uniform_, b=1e-4),
         # )
-        self.canonical_head = tcnn.Network(
-            n_input_dims=(
-                self.posi_encoder.latent_dim
-                + self.time_encoder.latent_dim
-            ),
-            n_output_dims=self.num_dim,
-            network_config={
-                "otype": "FullyFusedMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": 64,
-                "n_hidden_layers": 2,
-            },
-        )
-        self.fine_head = tcnn.Network(
-            n_input_dims=(
-                self.posi_encoder.latent_dim
-                + self.time_encoder.latent_dim
-            ),
-            n_output_dims=self.num_dim,
-            network_config={
-                "otype": "FullyFusedMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": 64,
-                "n_hidden_layers": 2,
-            },
-        )
+        # self.canonical_head = tcnn.Network(
+        #     n_input_dims=(
+        #         self.posi_encoder.latent_dim
+        #         + self.time_encoder.latent_dim
+        #     ),
+        #     n_output_dims=self.num_dim,
+        #     network_config={
+        #         "otype": "FullyFusedMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 64,
+        #         "n_hidden_layers": 2,
+        #     },
+        # )
+        # self.fine_head = tcnn.Network(
+        #     n_input_dims=(
+        #         self.sin_posi_encoder.latent_dim
+        #         + self.time_encoder.latent_dim
+        #     ),
+        #     n_output_dims=self.num_dim,
+        #     network_config={
+        #         "otype": "FullyFusedMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 64,
+        #         "n_hidden_layers": 1,
+        #     },
+        # )
+        # self.canonical_head = tcnn.Network(
+        #     n_input_dims=self.sin_posi_encoder.latent_dim+32,
+        #     n_output_dims=self.num_dim,
+        #     network_config={
+        #         "otype": "FullyFusedMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 64,
+        #         "n_hidden_layers": 2,
+        #     },
+        # )
+        # self.final_head = tcnn.Network(
+        #     n_input_dims=32,
+        #     n_output_dims=self.num_dim,
+        #     network_config={
+        #         "otype": "FullyFusedMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 64,
+        #         "n_hidden_layers": 1,
+        #     },
+        # )
         # self.canonical_head = dnerf
 
         # print("param_precision: ", self.canonical_head.native_tcnn_module.param_precision()) # Precision.Fp16
@@ -164,23 +252,49 @@ class CanonicalWarper(torch.nn.Module):
         return x.view(-1, self.num_dim)
 
 
-    def forward(self, x, timestamps, aabb=None):
-        # if aabb is not None:
-        #     aabb_min, aabb_max = torch.split(aabb, self.num_dim, dim=-1)
-        #     x = (x - aabb_min) / (aabb_max - aabb_min)
-        x_enc = self.posi_encoder(x)
-        t_enc = self.time_encoder(timestamps)
-        # padding zeros so the dimension is align with 16
-        # t = torch.cat([timestamps, timestamps**2], dim=-1)
-        x_enc = torch.cat([x_enc, t_enc], dim=-1)
-        if not x_enc.size(0) == 0:
-            x = self.canonical_head(x_enc)*0.01 + x
-            x_enc = torch.cat([self.posi_encoder(x), t_enc], dim=-1)
-            x = self.fine_head(x_enc)*0.001 + x
-        else:
-            x = torch.zeros_like(x)
+    def forward(self, x, timestamps, time_id=None, aabb=None):
+        if not x.size(0) == 0:
+            # if aabb is not None:
+            #     aabb_min, aabb_max = torch.split(aabb, self.num_dim, dim=-1)
+            #     x_n = (x - aabb_min) / (aabb_max - aabb_min)
+            # x_n = torch.cat([x_n, timestamps], dim=-1)
+            # flatten_xyz = self.xyz_encoding(x_n)
+            offsets = self.posi_encoder(torch.cat([x, timestamps], dim=-1))
+            grid_move =offsets[:, 0:3]*self.MOVING_STEP
+            fine_move = (torch.special.expit(offsets[:, 3:])*2 - 1)*self.MOVING_STEP
+            # xyz_feat = self.final_encoder(x_n)
+            # t_enc = self.time_encoder(timestamps)
+            # padding zeros so the dimension is align with 16
+            # t = torch.cat([timestamps, timestamps**2], dim=-1)
+            # x_enc = torch.cat([move_sin, move], dim=-1)
+            # move = self.canonical_head(x_enc)
+            # x_enc = torch.cat([x_enc, timestamps], dim=-1)
+            # x = move*MOVING_STEP + x_n
+            # grid_move = 0.
+            # fine_move = 0.
+            move = grid_move + fine_move
+            x = move + x
+            move_norm = move.norm(dim=-1)[:, None]
+            # print("move:", move.shape)
+            # print("x_n:", x_n.shape)
+            # print("move_norm:", move_norm.shape)
+            # x = x_enc*0.1 + x
 
-        return x.view(-1, self.num_dim)
+            # x_enc = torch.cat([self.sin_posi_encoder(x), t_enc], dim=-1)
+            # x = self.fine_head(x_enc)*0.01 + x
+            # if aabb is not None:
+            #     aabb_min, aabb_max = torch.split(aabb, self.num_dim, dim=-1)
+            #     x_n = (x - aabb_min) / (aabb_max - aabb_min)
+            # move = self.final_encoder(torch.cat([x_n, timestamps], dim=-1))
+            # x = move*0.1 + x
+        else:
+            move = torch.zeros_like(x)
+            move_norm = torch.zeros_like(x[:, 0:1])
+            grid_move = torch.zeros_like(x)
+            fine_move = torch.zeros_like(x)
+
+
+        return x.view(-1, self.num_dim), move, move_norm, grid_move, fine_move
 
 
 
@@ -191,8 +305,8 @@ class NGPDradianceField(NGPradianceField):
     def __init__(
         self,
         # dnerf,
-        logger,
         aabb: Union[torch.Tensor, List[float]],
+        logger = None,
         num_dim: int = 3,
         use_viewdirs: bool = True,
         density_activation: Callable = lambda x: trunc_exp(x - 1),
@@ -217,13 +331,14 @@ class NGPDradianceField(NGPradianceField):
         self.use_feat_predict = use_feat_predict
         self.use_weight_predict = use_weight_predict
         # self.aabb = self.aabb.to(torch.float16)
-        # b = np.exp(np.log(1024/16)/(n_levels-1))
+        # b = np.exp(np.log(2048/16)/(n_levels-1))
         # per_level_scale = b
+        # per_level_scale = 1.4472692012786865
+        # per_level_scale = 1.3819128274917603
         per_level_scale = 1.3195079565048218
         # self.wrap = CanonicalWarper(16)
         self.xyz_wrap = CanonicalWarper(3)
 
-        self.xyz_scale = torch.nn.Parameter(torch.tensor(3*[1e-2]))
         # self.xyz_can_encoder = tcnn.Encoding(
         #     n_input_dims=num_dim,
         #     encoding_config={
@@ -239,6 +354,8 @@ class NGPDradianceField(NGPradianceField):
         self.posi_encoder_feat = SinusoidalEncoderWithExp(3, 0, 4, True)
         self.time_encoder_feat = SinusoidalEncoderWithExp(1, 0, 4, True)
         self.time_encoder = SinusoidalEncoder(1, 0, 4, True)
+
+        # self.time_embedding = nn.Embedding(32, 8)
 
         # self.posi_encoder = tcnn.Encoding(
         #     n_input_dims=num_dim,
@@ -256,6 +373,7 @@ class NGPDradianceField(NGPradianceField):
         # )
 
         self.loose_move = False
+        self.return_extra = False
 
 
         self.xyz_encoder = tcnn.Encoding(
@@ -285,6 +403,7 @@ class NGPDradianceField(NGPradianceField):
 
         self.mlp_base = tcnn.Network(
             n_input_dims=32+self.time_encoder_feat.latent_dim,
+            # n_input_dims=32,
             # n_input_dims=64,
             n_output_dims=1 + self.geo_feat_dim,
             network_config={
@@ -296,17 +415,17 @@ class NGPDradianceField(NGPradianceField):
             },
         )
 
-        self.mlp_time = tcnn.Network(
-            n_input_dims=self.time_encoder_feat.latent_dim+self.posi_encoder_feat.latent_dim,
-            n_output_dims=32,
-            network_config={
-                "otype": "FullyFusedMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": 64,
-                "n_hidden_layers": 1,
-            },
-        )
+        # self.mlp_time = tcnn.Network(
+        #     n_input_dims=self.time_encoder.latent_dim,
+        #     n_output_dims=32,
+        #     network_config={
+        #         "otype": "FullyFusedMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 64,
+        #         "n_hidden_layers": 1,
+        #     },
+        # )
 
         if self.use_feat_predict:
             # self.mlp_feat_prediction = tcnn.Network(
@@ -321,7 +440,7 @@ class NGPDradianceField(NGPradianceField):
             #     },
             # )
             self.mlp_feat_prediction = MLP(
-                input_dim=self.posi_encoder.latent_dim*2 + self.time_encoder.latent_dim,
+                input_dim=self.posi_encoder.latent_dim + self.time_encoder.latent_dim,
                 output_dim=32,
                 net_depth=1,
                 net_width=64,
@@ -362,8 +481,8 @@ class NGPDradianceField(NGPradianceField):
         
 
         # self.mlp_time_to_density = tcnn.Network(
-        #     n_input_dims=32+9,
-        #     n_output_dims=1,
+        #     n_input_dims=15+8,
+        #     n_output_dims=15,
         #     network_config={
         #         "otype": "FullyFusedMLP",
         #         "activation": "ReLU",
@@ -413,41 +532,65 @@ class NGPDradianceField(NGPradianceField):
         # grid_xyz.requires_grad = False
         # self.register_buffer("grid_xyz", grid_xyz)
 
-        self.viz = logger
-        self.logger_count = 1
+        if logger is not None:
+            self.viz = logger
+            self.logger_count = 1
 
-        self.name = ['x', 'y', 'z']
-        self.grad_name = ['mean', 'min', 'max']
+            self.name = ['x', 'y', 'z']
+            self.grad_name = ['mean', 'min', 'max']
 
-        self.viz.line([0.], [0.], win='move_mean', opts=dict(title='move_mean', legend=self.name ))
-        self.viz.line([0.], [0.], win='move_min', opts=dict(title='move_min', legend=self.name ))
-        self.viz.line([0.], [0.], win='move_max', opts=dict(title='move_max', legend=self.name ))
-        self.viz.line([0.], [0.], win='move_norm', opts=dict(title='move_norm'))
+            self.viz.line([0.], [0.], win='move_mean', opts=dict(title='move_mean', legend=self.name ))
+            self.viz.line([0.], [0.], win='move_min', opts=dict(title='move_min', legend=self.name ))
+            self.viz.line([0.], [0.], win='move_max', opts=dict(title='move_max', legend=self.name ))
+            self.viz.line([0.], [0.], win='move_norm', opts=dict(title='move_norm', legend=self.name))
 
-        self.viz.line([0.], [0.], win='grad_feat_predict', opts=dict(title='grad_feat_predict', legend=self.grad_name))
-    
-        self.viz.line([0.], [0.], win='grad_weight_predict', opts=dict(title='grad_weight_predict', legend=self.grad_name))
+            self.viz.line([0.], [0.], win='grid_move_mean', opts=dict(title='grid_move_mean', legend=self.name ))
+            self.viz.line([0.], [0.], win='grid_move_min', opts=dict(title='grid_move_min', legend=self.name ))
+            self.viz.line([0.], [0.], win='grid_move_max', opts=dict(title='grid_move_max', legend=self.name ))
 
-        # self.viz.line([0.], [0.], win='grad_time_predict', opts=dict(title='grad_time_predict', legend=self.grad_name))
+            self.viz.line([0.], [0.], win='fine_move_mean', opts=dict(title='fine_move_mean', legend=self.name ))
+            self.viz.line([0.], [0.], win='fine_move_min', opts=dict(title='fine_move_min', legend=self.name ))
+            self.viz.line([0.], [0.], win='fine_move_max', opts=dict(title='fine_move_max', legend=self.name ))
 
-        self.viz.line([0.], [0.], win='grad_wrap1_predict', opts=dict(title='grad_wrap1_predict', legend=self.grad_name))
+            self.viz.line([0.], [0.], win='grad_feat_predict', opts=dict(title='grad_feat_predict', legend=self.grad_name))
+        
+            self.viz.line([0.], [0.], win='grad_weight_predict', opts=dict(title='grad_weight_predict', legend=self.grad_name))
 
-        self.viz.line([0.], [0.], win='grad_wrap2_predict', opts=dict(title='grad_wrap2_predict', legend=self.grad_name))
-        # self.viz.line([0.], [0.], win='x_scale', opts=dict(title='x_scale', legend=['x', 'y', 'z']))
-        # self.viz.line([0.], [0.], win='y_scale', opts=dict(title='y_scale', legend=['x', 'y', 'z']))
-        # self.viz.line([0.], [0.], win='z_scale', opts=dict(title='z_scale', legend=['x', 'y', 'z']))
+            # self.viz.line([0.], [0.], win='grad_time_predict', opts=dict(title='grad_time_predict', legend=self.grad_name))
 
-    def log_move(self, move):
+            self.viz.line([0.], [0.], win='grad_wrap1_predict', opts=dict(title='grad_wrap1_predict', legend=self.grad_name))
+
+            # self.viz.line([0.], [0.], win='grad_wrap2_predict', opts=dict(title='grad_wrap2_predict', legend=self.grad_name))
+            # self.viz.line([0.], [0.], win='x_scale', opts=dict(title='x_scale', legend=['x', 'y', 'z']))
+            # self.viz.line([0.], [0.], win='y_scale', opts=dict(title='y_scale', legend=['x', 'y', 'z']))
+            # self.viz.line([0.], [0.], win='z_scale', opts=dict(title='z_scale', legend=['x', 'y', 'z']))
+
+    def log_move(self, move, grid, fine):
 
         if self.logger_count % 50 == 0:
             i = self.logger_count
             t_move = move
             move_norm = move.norm(dim=-1)
             for j in range(3):
-                j_move = torch.abs(t_move[:, j])
+                j_move = t_move[:, j]
                 self.viz.line([torch.mean(j_move).item()], [i], win='move_mean', update='append', name=self.name[j])
+                j_move = torch.abs(t_move[:, j])
                 self.viz.line([torch.min(j_move).item()], [i], win='move_min', update='append', name=self.name[j])
                 self.viz.line([torch.max(j_move).item()], [i], win='move_max', update='append', name=self.name[j])
+
+            for j in range(3):
+                j_move = grid[:, j]
+                self.viz.line([torch.mean(j_move).item()], [i], win='grid_move_mean', update='append', name=self.name[j])
+                j_move = torch.abs(grid[:, j])
+                self.viz.line([torch.min(j_move).item()], [i], win='grid_move_min', update='append', name=self.name[j])
+                self.viz.line([torch.max(j_move).item()], [i], win='grid_move_max', update='append', name=self.name[j])
+
+            for j in range(3):
+                j_move = fine[:, j]
+                self.viz.line([torch.mean(j_move).item()], [i], win='fine_move_mean', update='append', name=self.name[j])
+                j_move = torch.abs(fine[:, j])
+                self.viz.line([torch.min(j_move).item()], [i], win='fine_move_min', update='append', name=self.name[j])
+                self.viz.line([torch.max(j_move).item()], [i], win='fine_move_max', update='append', name=self.name[j])
                 
             self.viz.line([torch.mean(move_norm).item()], [i], win='move_norm', update='append')
                 # j_bmove = self.xyz_scale
@@ -481,36 +624,49 @@ class NGPDradianceField(NGPradianceField):
             # for j in range(3):
             #     self.viz.line([data_info[j]], [step], win='grad_time_predict', update='append', name=self.grad_name[j])
 
-            parameters_grad = [p.grad.reshape(-1) for p in self.xyz_wrap.canonical_head.parameters()]
-            grad = torch.cat(parameters_grad, dim=-1)
-            data_info = [torch.mean(grad).item(), torch.min(grad).item(), torch.max(grad).item()]
+            # parameters_grad = [p.grad.reshape(-1) for p in self.xyz_wrap.canonical_head.parameters()]
+            # grad = torch.cat(parameters_grad, dim=-1)
+            # data_info = [torch.mean(grad).item(), torch.min(grad).item(), torch.max(grad).item()]
 
-            for j in range(3):
-                self.viz.line([data_info[j]], [step], win='grad_wrap1_predict', update='append', name=self.grad_name[j])
+            # for j in range(3):
+            #     self.viz.line([data_info[j]], [step], win='grad_wrap1_predict', update='append', name=self.grad_name[j])
 
-            parameters_grad = [p.grad.reshape(-1) for p in self.xyz_wrap.fine_head.parameters()]
-            grad = torch.cat(parameters_grad, dim=-1)
-            data_info = [torch.mean(grad).item(), torch.min(grad).item(), torch.max(grad).item()]
+            # parameters_grad = [p.grad.reshape(-1) for p in self.xyz_wrap.canonical_head_2.parameters()]
+            # grad = torch.cat(parameters_grad, dim=-1)
+            # data_info = [torch.mean(grad).item(), torch.min(grad).item(), torch.max(grad).item()]
 
-            for j in range(3):
-                self.viz.line([data_info[j]], [step], win='grad_wrap2_predict', update='append', name=self.grad_name[j])
+            # for j in range(3):
+            #     self.viz.line([data_info[j]], [step], win='grad_wrap2_predict', update='append', name=self.grad_name[j])
 
 
-    def query_density(self, x, timestamps, return_feat: bool = False, dir: torch.Tensor = None):
+    def query_density(self, x, timestamps, time_id: torch.Tensor = None, return_feat: bool = False, dir: torch.Tensor = None):
         # move = self.xyz_wrap(x, timestamps).detach()
         # feat = self.wrap(x, timestamps)
         # move_norm = move.norm(dim=-1)
-        timestamps = timestamps * 2
+        # timestamps = timestamps * 2
         # x_ori = x
         # x = x.to(torch.float16)
         # timestamps = timestamps.to(torch.float16)
+        # aabb_min, aabb_max = torch.split(self.aabb, self.num_dim, dim=-1)
+
+        if self.unbounded:
+            x = contract_to_unisphere(x, self.aabb)
+        else:
+            aabb_min, aabb_max = torch.split(self.aabb, self.num_dim, dim=-1)
+            x = (x - aabb_min) / (aabb_max - aabb_min)
+            # x_move = (x_move - aabb_min) / (aabb_max - aabb_min)
+            # move = ((move - aabb_min) / (aabb_max - aabb_min)
+
         if not self.loose_move:
-            x_move = self.xyz_wrap(x, timestamps, self.aabb)
-            move = x_move - x
-            move_norm = move.norm(dim=-1)[:, None]
+            x_move, move, move_norm, grid_move, fine_move = self.xyz_wrap(x, timestamps, time_id=time_id, aabb=self.aabb)
+            # move = grid_move + fine_move
+            # grid_move = grid_move * (aabb_max - aabb_min) + aabb_min 
+            # fine_move = fine_move * (aabb_max - aabb_min) + aabb_min 
             # m_factor = (torch.exp(0.5*(move_norm))).detach()
         else:
             x_move = x
+            aabb_min, aabb_max = torch.split(self.aabb, self.num_dim, dim=-1)
+            x_move = (x_move - aabb_min) / (aabb_max - aabb_min)
             move_norm = torch.zeros_like(x[:, 0:1])
             # m_factor = 0.
         # move = torch.clamp(move, -1.5, 1.5)
@@ -520,18 +676,14 @@ class NGPDradianceField(NGPradianceField):
         #     x_move = x 
         # x_move = x_move + self.mlp_fine(x_move)
 
-        if self.unbounded:
-            x = contract_to_unisphere(x, self.aabb)
-        else:
-            aabb_min, aabb_max = torch.split(self.aabb, self.num_dim, dim=-1)
-            # x_ori = (x - aabb_min) / (aabb_max - aabb_min)
-            x_move = (x_move - aabb_min) / (aabb_max - aabb_min)
-            # move = ((move - aabb_min) / (aabb_max - aabb_min)
-        
         selector = ((x_move > 0.0) & (x_move < 1.0)).all(dim=-1)
+        # selector_move = ((x_move > 0.0) & (x_move < 1.0)).all(dim=-1)[:, None]
         # selector_ori = ((x_ori > 0.0) & (x_ori < 1.0)).all(dim=-1)[:, None]
+        # static_feat = self.xyz_encoder(x_ori.view(-1, self.num_dim))
+        # dynimc_feat = self.move_encoder(x_move.view(-1, self.num_dim))
+        # cond = move_norm > 1e-5
+        # x_final = torch.where(cond, x_move, x_ori)
         static_feat = self.xyz_encoder(x_move.view(-1, self.num_dim))
-        dynimc_feat = self.move_encoder(x_move.view(-1, self.num_dim))
 
 
         # static_feat = static_feat.reshape(-1, 32, 2)
@@ -539,8 +691,7 @@ class NGPDradianceField(NGPradianceField):
         # print("static_feat: ", static_feat.shape)
         # print("selector_move: ", selector_move.shape)
         # print("selector_ori: ", selector_ori.shape)
-        cond = move_norm > 1e-5
-        new_feat = torch.where(cond, dynimc_feat, static_feat)
+        # new_feat = torch.where(cond, dynimc_feat, static_feat)
         # selector = torch.where(cond, selector_move, selector_ori)[:, 0]
         # feat = self.xyz_encoder(x.view(-1, self.num_dim))
         # move_feat = self.xyz_encoder(x_ori.view(-1, self.num_dim))
@@ -551,14 +702,21 @@ class NGPDradianceField(NGPradianceField):
         
         # new_static = static_feat_shape[..., 0] * (1-move_norm) + move_norm*static_feat_shape[..., 1]
 
-        time_encode = self.time_encoder_feat(timestamps, move_norm)
+        time_encode = self.time_encoder_feat(timestamps, move_norm.detach())
+        # t_l = torch.floor(timestamps * 31).long()
+        # t_h = torch.ceil(timestamps * 31).long()
+        # interval = timestamps - t_l
+        # t_l_emb = self.time_embedding(t_l.squeeze(-1))
+        # t_h_emb = self.time_embedding(t_h.squeeze(-1))
+        # time_encode = t_l_emb * (1-interval) + interval * t_h_emb
+        # time_encode = self.time_encoder(timestamps)
         # pos_encode_feat = self.posi_encoder_feat(x_move, move_norm)
         # if not time_encode.size(0) == 0:
-        #     t_feat = self.mlp_time(torch.cat([pos_encode_feat, time_encode], dim=-1))
+        #     t_feat = self.mlp_time(time_encode)
         # else:
         #     t_feat = torch.zeros_like(static_feat)
 
-        cat_x = torch.cat([new_feat, time_encode], dim=-1)
+        cat_x = torch.cat([static_feat, time_encode], dim=-1)
 
         x = (
             self.mlp_base(cat_x)
@@ -573,47 +731,56 @@ class NGPDradianceField(NGPradianceField):
             * selector[..., None]
         )
 
+        # base_mlp_out = torch.cat([base_mlp_out, time_encode], dim=-1)
+        # base_mlp_out = self.mlp_time_to_density(torch.cat([base_mlp_out, time_encode], dim=-1))
+
         if return_feat:
-            if self.training and (self.use_feat_predict or self.use_weight_predict):
-                self.log_move(move)
-                # predict = self.mlp_time_prediction(cat_x)
-                # feat_times = torch.cat([static_feat, self.xyz_wrap.time_encoder(timestamps)], dim=-1)
-                # print(feat_times.shape)
-                # predict_density = self.mlp_time_to_density(feat_times)
-                # target = torch.cat([timestamps, x_move, move], dim=-1)
-                
-                temp_feat = torch.cat([
-                    self.posi_encoder(x_move), 
-                    self.posi_encoder(dir),
-                    self.time_encoder(timestamps)
-                ], dim=-1)
-                # temp_feat = self.posi_encoder(x_move, move_norm)
+            if self.training:
+                self.log_move(move, grid_move, fine_move)
+                if self.use_feat_predict or self.use_weight_predict:
+                    # predict = self.mlp_time_prediction(cat_x)
+                    # feat_times = torch.cat([static_feat, self.xyz_wrap.time_encoder(timestamps)], dim=-1)
+                    # print(feat_times.shape)
+                    # predict_density = self.mlp_time_to_density(feat_times)
+                    # target = torch.cat([timestamps, x_move, move], dim=-1)
+                    # x_enc = torch.where(cond, self.posi_encoder(x_move), self.posi_encoder(x_ori))
+                    x_enc = self.posi_encoder(x_move)
+                    temp_feat = torch.cat([
+                        x_enc, 
+                        # self.posi_encoder(dir),
+                        self.time_encoder(timestamps)
+                    ], dim=-1)
+                    # temp_feat = self.posi_encoder(x_move, move_norm)
 
-                if self.use_feat_predict:
-                    if not x_move.size(0) == 0:
-                        predict = self.mlp_feat_prediction(temp_feat)
+                    if self.use_feat_predict:
+                        if not x_move.size(0) == 0:
+                            predict = self.mlp_feat_prediction(temp_feat)
+                        else:
+                            predict = torch.zeros_like(static_feat)
+                        loss_feat = F.huber_loss(predict, static_feat, reduction='none') * selector[..., None]
                     else:
-                        predict = torch.zeros_like(static_feat)
-                    loss_feat = F.huber_loss(predict, new_feat, reduction='none') * selector[..., None]
-                else:
-                    loss_feat = None
+                        loss_feat = None
 
-                if self.use_weight_predict:
-                    if not x_move.size(0) == 0:
-                        predict_weight = self.mlp_time_to_weight(temp_feat)
+                    if self.use_weight_predict:
+                        if not x_move.size(0) == 0:
+                            predict_weight = self.mlp_time_to_weight(temp_feat)
+                        else:
+                            predict_weight = torch.zeros_like(density)
                     else:
-                        predict_weight = torch.zeros_like(density)
+                        predict_weight = None 
+                    # time_predict = self.mlp_feat_norm(static_feat)
+                    # w_dim = time_predict.dim()
+                    # m_dim = timestamps.dim()
+                    # assert w_dim == m_dim, f"time_predict: {w_dim} and timestamps :{m_dim} not equal!"
+                    # loss_times = F.smooth_l1_loss(time_predict, timestamps, reduction='none')
+
+
+                    return density, base_mlp_out, [loss_feat, predict_weight, selector]
+                    # loss_density = F.smooth_l1_loss(predict_density, density, reduction='none')
+                elif self.return_extra:
+                    return density, base_mlp_out, [None, None, None]
                 else:
-                    predict_weight = None 
-                # time_predict = self.mlp_feat_norm(static_feat)
-                # w_dim = time_predict.dim()
-                # m_dim = timestamps.dim()
-                # assert w_dim == m_dim, f"time_predict: {w_dim} and timestamps :{m_dim} not equal!"
-                # loss_times = F.smooth_l1_loss(time_predict, timestamps, reduction='none')
-
-
-                return density, base_mlp_out, [loss_feat, predict_weight, selector, move_norm * selector[..., None]]
-                # loss_density = F.smooth_l1_loss(predict_density, density, reduction='none')
+                    return density, base_mlp_out
             else:
                 return density, base_mlp_out
         else:
@@ -624,18 +791,23 @@ class NGPDradianceField(NGPradianceField):
     #     return grid_feat
 
 
+
     def forward(
         self,
         positions: torch.Tensor,
         timestamps: torch.Tensor,
         directions: torch.Tensor = None,
+        time_id: torch.Tensor = None,
     ):
         if self.use_viewdirs and (directions is not None):
             assert (
                 positions.shape == directions.shape
             ), f"{positions.shape} v.s. {directions.shape}"
-            if self.training and (self.use_feat_predict or self.use_weight_predict):
-                density, embedding, extra = self.query_density(positions, timestamps, dir=directions, return_feat=True)
+            directions = directions / torch.linalg.norm(
+                directions, dim=-1, keepdims=True
+            )
+            if self.training and (self.return_extra):
+                density, embedding, extra = self.query_density(positions, timestamps, time_id=time_id, dir=directions, return_feat=True)
                 rgb = self._query_rgb(directions, embedding=embedding)
                 return rgb, density, extra
             else:

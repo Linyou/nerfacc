@@ -85,7 +85,7 @@ class MLP(nn.Module):
 
             self.output_layer.apply(init_func_output)
 
-    @autocast(dtype=torch.float32)
+    # @autocast(dtype=torch.float32)
     def forward(self, x):
         inputs = x
         for i in range(self.net_depth):
@@ -264,6 +264,7 @@ class DNeRFRadianceField(nn.Module):
             output_init=functools.partial(torch.nn.init.uniform_, b=1e-4),
         )
         self.nerf = VanillaNeRFRadianceField()
+        self.loose_move = False
 
     def query_opacity(self, x, timestamps, step_size):
         idxs = torch.randint(0, len(timestamps), (x.shape[0],), device=x.device)
@@ -275,9 +276,11 @@ class DNeRFRadianceField(nn.Module):
         return opacity
 
     def query_density(self, x, t):
-        x = x + self.warp(
-            torch.cat([self.posi_encoder(x), self.time_encoder(t)], dim=-1)
-        )
+        if not self.loose_move:
+            x = x + self.warp(
+                torch.cat([self.posi_encoder(x), self.time_encoder(t)], dim=-1)
+            )
+            
         return self.nerf.query_density(x)
 
     def forward(self, x, t, condition=None):
