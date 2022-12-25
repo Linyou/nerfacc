@@ -12,8 +12,8 @@ import torch
 import torch.nn.functional as F
 import tqdm
 from radiance_fields.custom_ngp import NGPDradianceField
-from utils import render_image, set_random_seed, get_opts
-from custom_utils import custom_render_image
+from utils import render_image, set_random_seed
+from custom_utils import custom_render_image, get_feat_dir_and_loss, get_opts
 from visdom import Visdom
 from radiance_fields.mlp import DNeRFRadianceField
 
@@ -150,8 +150,12 @@ def main(args, gui=False):
         unbounded=args.unbounded,
         use_feat_predict=args.use_feat_predict,
         use_weight_predict=args.use_weight_predict,
+        moving_step=args.moving_step,
+        use_dive_offsets=args.use_dive_offsets,
     ).to(device)
+
     lr = args.lr
+
     optimizer = torch.optim.Adam(
         radiance_field.parameters(), lr=lr, eps=1e-15
     )
@@ -208,25 +212,7 @@ def main(args, gui=False):
 
 
     # generate log fir for test image and psnr
-    feat_dir = 'pf' if args.use_feat_predict else 'nopf'
-    if args.use_weight_predict:
-        feat_dir += '_pw'
-    else:
-        feat_dir += '_nopw'
-
-    if args.rec_loss == 'huber':
-        rec_loss_fn = F.huber_loss
-        feat_dir += '_l-huber'
-    elif args.rec_loss == 'mse':
-        rec_loss_fn = F.mse_loss
-        feat_dir += '_l-mse'
-    else:
-        feat_dir += '_l-sml1'
-        rec_loss_fn = F.smooth_l1_loss
-
-    if args.distortion_loss:
-        feat_dir += "_distor"
-
+    feat_dir, rec_loss_fn = get_feat_dir_and_loss(args)
 
     # training
     step = 0
@@ -321,18 +307,7 @@ def main(args, gui=False):
                 alive_ray_mask = acc.squeeze(-1) > 0
 
                 # compute loss
-
-                # grid_feat = radiance_field.get_grid()
-                # tv = total_variation_loss(grid_feat.view(64, 64, 64, -1))
-
-                # loss_times = F.smooth_l1_loss(times_acc[alive_ray_mask], timestamps[alive_ray_mask])
-                # loss_extra = (extra[0][alive_ray_mask]).mean()*1e-1
-                # loss_distor = (extra[1][alive_ray_mask] * 0.01).mean()
-                # for k in extra:
-                #     loss_extra += (k[alive_ray_mask]*0.01).mean()
-
                 rec_loss = rec_loss_fn(rgb[alive_ray_mask], pixels[alive_ray_mask], reduction='none')
-                    
                 loss = rec_loss.mean()
 
                 if args.use_opacity_loss:
@@ -352,13 +327,10 @@ def main(args, gui=False):
                 else:
                     loss_weight = 0.
 
-                # loss_time = (extra[2][alive_ray_mask]).mean()
-                # loss += loss_time
-
                 if args.distortion_loss:
                     loss_distor = 0.
                     for (weight, t_starts, t_ends, ray_indices, packed_info) in extra_info:
-                        alive_samples_mask = alive_ray_mask[ray_indices.long()]
+                        # alive_samples_mask = alive_ray_mask[ray_indices.long()]
                         # loss_extra += F.smooth_l1_loss(predict[alive_samples_mask], hash_feat[alive_samples_mask])*0.1
                         loss_distor += distortion(packed_info, weight, t_starts, t_ends)[alive_ray_mask].mean() * 1e-2
                 
@@ -378,19 +350,15 @@ def main(args, gui=False):
             if not scale > grad_scaler.get_scale():
                 scheduler.step()
 
-            # scheduler.step()
-
             if gui:
                 send_dist(radiance_field, occupancy_grid, is_async=True)
 
-            if args.test_print and step % 1000 == 0:
+            if step % 1000 == 0:
                 elapsed_time = time.time() - tic
                 loss = F.mse_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
                 loss_log = f"loss={loss:.5f} | "
                 if args.use_feat_predict:
                     loss_log += f"extra={loss_extra:.7f} | "
-
-                # loss_log += f"time={loss_time:.7f} | "
 
                 if args.use_weight_predict:
                     loss_log += f"weight={loss_weight:.7f} | "
@@ -405,59 +373,62 @@ def main(args, gui=False):
                     f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} |"
                 )
 
+
                 str_lr = str(lr).replace('.', '-')
                 # evaluation
                 radiance_field.eval()
                 image_root = f'{results_root}/ngp_dnerf/{args.scene}/lr_{str_lr}/{feat_dir}/training'
-                # print('image_root: ', image_root)
 
-                with torch.no_grad():
+                if args.test_print:
+                    # print('image_root: ', image_root)
 
-                    # for i in tqdm.tqdm(range(len(test_dataset))):
-                    i_id = 15
-                    data = test_dataset[i_id]
-                    render_bkgd = data["color_bkgd"]
-                    rays = data["rays"]
-                    pixels = data["pixels"]
-                    timestamps = data["timestamps"]
+                    with torch.no_grad():
 
-                    # rendering
-                    rgb, acc, depth, _, = render_image(
-                        radiance_field,
-                        occupancy_grid,
-                        rays,
-                        scene_aabb,
-                        # rendering options
-                        near_plane=near_plane,
-                        far_plane=far_plane,
-                        render_step_size=render_step_size,
-                        render_bkgd=render_bkgd,
-                        cone_angle=args.cone_angle,
-                        alpha_thre=alpha_thre,
-                        # test options
-                        test_chunk_size=args.test_chunk_size,
-                        timestamps=timestamps,
-                    )
-                    mse = F.mse_loss(rgb, pixels)
-                    psnr = -10.0 * torch.log(mse) / np.log(10.0)
+                        # for i in tqdm.tqdm(range(len(test_dataset))):
+                        i_id = 15
+                        data = test_dataset[i_id]
+                        render_bkgd = data["color_bkgd"]
+                        rays = data["rays"]
+                        pixels = data["pixels"]
+                        timestamps = data["timestamps"]
 
-                    os.makedirs(f'{image_root}', exist_ok=True)
-                    assert os.path.exists(f'{image_root}'), f"test images saving path dose not exits! path: {image_root}"
-                    # print("depth shape: ", depth.shape)
+                        # rendering
+                        rgb, acc, depth, _, = render_image(
+                            radiance_field,
+                            occupancy_grid,
+                            rays,
+                            scene_aabb,
+                            # rendering options
+                            near_plane=near_plane,
+                            far_plane=far_plane,
+                            render_step_size=render_step_size,
+                            render_bkgd=render_bkgd,
+                            cone_angle=args.cone_angle,
+                            alpha_thre=alpha_thre,
+                            # test options
+                            test_chunk_size=args.test_chunk_size,
+                            timestamps=timestamps,
+                        )
+                        mse = F.mse_loss(rgb, pixels)
+                        psnr = -10.0 * torch.log(mse) / np.log(10.0)
 
-                    imageio.imwrite(
-                        f"{image_root}/acc_{i_id}_{step}.png",
-                        ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
-                    )
-                    imageio.imwrite(
-                        f"{image_root}/depth_{i_id}_{step}.png",
-                        (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
-                    )
-                    imageio.imwrite(
-                        f"{image_root}/rgb_{i_id}_{step}.png",
-                        (rgb.cpu().numpy() * 255).astype(np.uint8),
-                    )
-                    print(f"test {i_id} for {step} iter: {psnr}")
+                        os.makedirs(f'{image_root}', exist_ok=True)
+                        assert os.path.exists(f'{image_root}'), f"test images saving path dose not exits! path: {image_root}"
+                        # print("depth shape: ", depth.shape)
+
+                        imageio.imwrite(
+                            f"{image_root}/acc_{i_id}_{step}.png",
+                            ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{image_root}/depth_{i_id}_{step}.png",
+                            (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            f"{image_root}/rgb_{i_id}_{step}.png",
+                            (rgb.cpu().numpy() * 255).astype(np.uint8),
+                        )
+                        print(f"test {i_id} for {step} iter: {psnr}")
 
             if step >= 0 and step % max_steps == 0 and step > 0:
                 str_lr = str(lr).replace('.', '-')

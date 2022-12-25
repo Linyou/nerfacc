@@ -5,7 +5,7 @@ from scipy.spatial.transform import Rotation as R
 import time
 import cv2
 
-from utils import get_opts
+from custom_utils import get_opts, get_feat_dir_and_loss
 
 import math
 import time
@@ -232,6 +232,8 @@ class NGPGUI:
                 unbounded=args.unbounded,
                 use_feat_predict=args.use_feat_predict,
                 use_weight_predict=args.use_weight_predict,
+                moving_step=args.moving_step,
+                use_dive_offsets=args.use_dive_offsets,
             ).to(device)
 
             self.occupancy_grid = OccupancyGrid(
@@ -243,21 +245,7 @@ class NGPGUI:
             # loading pretrained model
             if args.pretrained_model_path == '':
                 # generate log fir for test image and psnr
-                feat_dir = 'pf' if args.use_feat_predict else 'nopf'
-                if args.use_weight_predict:
-                    feat_dir += '_pw'
-                else:
-                    feat_dir += '_nopw'
-
-                if args.rec_loss == 'huber':
-                    feat_dir += '_l-huber'
-                elif args.rec_loss == 'mse':
-                    feat_dir += '_l-mse'
-                else:
-                    feat_dir += '_l-sml1'
-
-                if args.distortion_loss:
-                    feat_dir += "_distor"
+                feat_dir, _ = get_feat_dir_and_loss(args)
                 
                 str_lr = str(args.lr).replace('.', '-')
                 root = '/home/loyot/workspace/code/training_results/nerfacc/checkpoints'
@@ -407,12 +395,8 @@ def render_gui(ngp=None, args=None):
     train_views_size = ngp.train_dataset.images.shape[0]-1
     test_views_size = ngp.test_dataset.images.shape[0]-1
 
+    ngp.radiance_field.eval()
     while window.running:
-        # if args is not None:
-        #     if conn.poll():
-        #         ngp = conn.recv()[0]
-
-        ngp.radiance_field.eval()
 
         if args is not None:
             rev_param(ngp, is_async=True)

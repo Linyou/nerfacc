@@ -21,7 +21,6 @@ sys.path.insert(
 )
 from scene_manager import SceneManager
 
-
 def _load_colmap(root_fp: str, subject_id: str, split: str, factor: int = 1):
     assert factor in [1, 2, 4, 8]
 

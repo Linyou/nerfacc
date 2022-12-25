@@ -1,4 +1,5 @@
 
+import argparse
 import random
 from typing import Optional
 
@@ -19,6 +20,149 @@ from torch.cuda.amp import autocast
 from nerfacc import OccupancyGrid, ray_marching, rendering, pack_info, render_weight_from_density, render_weight_from_alpha, accumulate_along_rays
 
 from radiance_fields import trunc_exp
+
+
+def get_opts():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--train_split",
+        type=str,
+        default="trainval",
+        choices=["train", "trainval"],
+        help="which train split to use",
+    )
+    parser.add_argument(
+        "--scene",
+        type=str,
+        default="lego",
+        choices=[
+            # dnerf
+            "bouncingballs",
+            "hellwarrior",
+            "hook",
+            "jumpingjacks",
+            "lego",
+            "mutant",
+            "standup",
+            "trex",
+        ],
+        help="which scene to use",
+    )
+    parser.add_argument(
+        "--aabb",
+        type=lambda s: [float(item) for item in s.split(",")],
+        default="-1.5,-1.5,-1.5,1.5,1.5,1.5",
+        help="delimited list input",
+    )
+    parser.add_argument(
+        "--test_chunk_size",
+        type=int,
+        default=8192,
+    )
+    parser.add_argument(
+        "--unbounded",
+        action="store_true",
+        help="whether to use unbounded rendering",
+    )
+    parser.add_argument(
+        "--auto_aabb",
+        action="store_true",
+        help="whether to automatically compute the aabb",
+    )
+    parser.add_argument(
+        '-f',
+        "--use_feat_predict",
+        action="store_true",
+        help="use a mlp to predict the hash feature",
+    )
+    parser.add_argument(
+        '-w',
+        "--use_weight_predict",
+        action="store_true",
+        help="use a mlp to predict the weight feature",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-2,
+    )
+    parser.add_argument(
+        '-d',
+        "--distortion_loss",
+        action="store_true",
+        help="use a distortion loss",
+    )
+    parser.add_argument(
+        "--rec_loss",
+        type=str,
+        default="huber",
+        choices=[
+            "huber",
+            "mse",
+            "smooth_l1",
+        ],
+    )
+    parser.add_argument(
+        '-o',
+        "--use_opacity_loss",
+        action="store_true",
+        help="use a opacity loss",
+    )
+    parser.add_argument(
+        "--pretrained_model_path",
+        default="",
+    )
+
+    parser.add_argument(
+        '-tp',
+        "--test_print",
+        action="store_true",
+        help="run evaluation during training",
+    )
+
+    parser.add_argument(
+        '-df',
+        "--use_dive_offsets",
+        action="store_true",
+        help="predict offsets for the DIVE method",
+    )
+
+    parser.add_argument(
+        '-ms',
+        "--moving_step",
+        type=float,
+        default=1024.,
+    )
+    parser.add_argument("--cone_angle", type=float, default=0.0)
+    args = parser.parse_args()
+
+    return args
+
+def get_feat_dir_and_loss(args):
+    feat_dir = 'pf' if args.use_feat_predict else 'nopf'
+    if args.use_weight_predict:
+        feat_dir += '_pw'
+    else:
+        feat_dir += '_nopw'
+
+    if args.rec_loss == 'huber':
+        rec_loss_fn = F.huber_loss
+        feat_dir += '_l-huber'
+    elif args.rec_loss == 'mse':
+        rec_loss_fn = F.mse_loss
+        feat_dir += '_l-mse'
+    else:
+        feat_dir += '_l-sml1'
+        rec_loss_fn = F.smooth_l1_loss
+
+    if args.distortion_loss:
+        feat_dir += "_distor"
+
+    if args.use_dive_offsets:
+        feat_dir += "_dive"
+
+    return feat_dir, rec_loss_fn
+
 
 @torch.cuda.amp.autocast(dtype=torch.float32)
 def reduce_along_rays(
@@ -112,6 +256,7 @@ def accumulate_along_rays_no_weight(
     outputs = torch.zeros((n_rays, values.shape[-1]), device=values.device)
     outputs.scatter_add_(0, index, values)
     return outputs
+
 
 def custom_rendering(
     # ray marching results
