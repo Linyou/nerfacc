@@ -8,7 +8,7 @@ from torch import nn
 from torch.autograd import Function
 import torch.nn.functional as F
 from torch.cuda.amp import custom_bwd, custom_fwd
-from .ngp import NGPradianceField, contract_to_unisphere, trunc_exp
+from .ngp import NGPradianceField, trunc_exp
 from .mlp import SinusoidalEncoder, MLP
 
 try:
@@ -20,6 +20,32 @@ except ImportError as e:
         "pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch"
     )
     exit()
+
+
+def contract_to_unisphere(
+    x: torch.Tensor,
+    aabb: torch.Tensor,
+    eps: float = 1e-6,
+    derivative: bool = False,
+):
+    aabb_min, aabb_max = torch.split(aabb, 3, dim=-1)
+    x = (x - aabb_min) / (aabb_max - aabb_min)
+    x = x * 2 - 1  # aabb is at [-1, 1]
+    mag = x.norm(dim=-1, keepdim=True)
+    mask = mag.squeeze(-1) > 1
+
+    if derivative:
+        dev = (2 * mag - 1) / mag**2 + 2 * x**2 * (
+            1 / mag**3 - (2 * mag - 1) / mag**4
+        )
+        dev[~mask] = 1.0
+        dev = torch.clamp(dev, min=eps)
+        return dev
+    else:
+        x[mask] = (2 - 1 / mag[mask]) * (x[mask] / mag[mask])
+        x = x / 4 + 0.5  # [-inf, inf] is at [0, 1]
+        return x, mask
+
 
 MOVING_STEP = 1/4096
 class SinusoidalEncoderWithExp(nn.Module):
@@ -98,20 +124,34 @@ class CanonicalWarper(torch.nn.Module):
             },
         )
 
-    def forward(self, x, timestamps, time_id=None, aabb=None):
+    def forward(self, x, timestamps, time_id=None, aabb=None, mask=None):
         if not x.size(0) == 0:
+            if mask != None:
+                x_ori = x
+                x = x[mask]
+                timestamps = timestamps[mask]
+
             offsets = self.posi_encoder(torch.cat([x, timestamps], dim=-1))
             if self.use_dive_offsets:
-                grid_move =offsets[:, 0:3]*self.MOVING_STEP
+                grid_move = offsets[:, 0:3]*self.MOVING_STEP
                 fine_move = (torch.special.expit(offsets[:, 3:])*2 - 1)*self.MOVING_STEP
                 # fine_move = F.tanh(offsets[:, 3:])*self.MOVING_STEP
             else:
                 grid_move = offsets*self.MOVING_STEP
                 fine_move = torch.zeros_like(grid_move)
-                
+
             move = grid_move + fine_move
-            x = move + x
-            move_norm = move.norm(dim=-1)[:, None]
+
+            if mask != None:
+                x_ori[mask] += move
+                x = x_ori
+                move_norm = torch.zeros_like(x[:, 0:1])
+                move_norm[mask] += move.norm(dim=-1)[:, None]
+            else:
+                x = move + x
+                move_norm = move.norm(dim=-1)[:, None]
+
+
         else:
             move = torch.zeros_like(x)
             move_norm = torch.zeros_like(x[:, 0:1])
@@ -143,6 +183,9 @@ class NGPDradianceField(NGPradianceField):
         use_weight_predict: bool = False,
         moving_step: float = MOVING_STEP,
         use_dive_offsets: bool = False,
+        use_time_embedding: bool = False,
+        use_time_attenuation: bool = False,
+        hash_level: int = 0,
     ) -> None:
         super().__init__(
             aabb, 
@@ -158,23 +201,35 @@ class NGPDradianceField(NGPradianceField):
         self.return_extra = False
         self.loose_move = False
 
+        # self.aabb = self.aabb.to(torch.float16)
+        # b = np.exp(np.log(2048/16)/(n_levels-1))
+        # per_level_scale = b
+        if hash_level == 0:
+            per_level_scale = 1.3195079565048218 # 1024
+        elif hash_level == 1:
+            per_level_scale = 1.3819128274917603 # 2048
+        elif hash_level == 2:
+            per_level_scale = 1.4472692012786865 # 4096
+
         print('--NGPDradianceField configuration--')
-        if use_dive_offsets:
-            print(f'  moving_step: {moving_step}')
+        print(f'  moving_step: {moving_step}')
+        print(f'  hash_level: {hash_level}, b: {per_level_scale:6f}')
         print(f'  use_dive_offsets: {use_dive_offsets}')
         print(f'  use_feat_predict: {use_feat_predict}')
         print(f'  use_weight_predict: {use_weight_predict}')
+        print(f'  use_time_embedding: {use_time_embedding}')
+        print(f'  use_time_attenuation: {use_time_attenuation}')
         print('-----------------------------------')
 
 
         self.use_feat_predict = use_feat_predict
         self.use_weight_predict = use_weight_predict
-        # self.aabb = self.aabb.to(torch.float16)
-        # b = np.exp(np.log(2048/16)/(n_levels-1))
-        # per_level_scale = b
+        self.use_time_embedding = use_time_embedding
+        self.use_time_attenuation = use_time_attenuation
+
         # per_level_scale = 1.4472692012786865
         # per_level_scale = 1.3819128274917603
-        per_level_scale = 1.3195079565048218
+        # per_level_scale = 1.3195079565048218
         self.xyz_wrap = CanonicalWarper(
             3, 
             moving_step=1./moving_step, 
@@ -182,9 +237,8 @@ class NGPDradianceField(NGPradianceField):
         )
 
         # self.posi_encoder = SinusoidalEncoder(3, 0, 4, True)
-        # self.time_encoder = SinusoidalEncoder(1, 0, 4, True)
-
-        self.time_encoder_feat = SinusoidalEncoderWithExp(1, 0, 4, True)
+        self.time_encoder = SinusoidalEncoder(1, 0, 4, True)
+        self.time_encoder_feat = SinusoidalEncoderWithExp(1, 0, 6, True)
 
         self.xyz_encoder = tcnn.Encoding(
             n_input_dims=num_dim,
@@ -199,9 +253,15 @@ class NGPDradianceField(NGPradianceField):
             },
         )
 
+        input_dim4base = 32
+        if self.use_time_embedding:
+            if self.use_time_attenuation:
+                input_dim4base += self.time_encoder_feat.latent_dim
+            else:
+                input_dim4base += self.time_encoder.latent_dim
 
         self.mlp_base = tcnn.Network(
-            n_input_dims=32+self.time_encoder_feat.latent_dim,
+            n_input_dims=input_dim4base,
             # n_input_dims=32,
             # n_input_dims=64,
             n_output_dims=1 + self.geo_feat_dim,
@@ -249,8 +309,8 @@ class NGPDradianceField(NGPradianceField):
                 },
             )
 
+        self.viz = logger
         if logger is not None:
-            self.viz = logger
             self.logger_count = 1
 
             self.name = ['x', 'y', 'z']
@@ -277,7 +337,7 @@ class NGPDradianceField(NGPradianceField):
 
     def log_move(self, move, grid, fine):
 
-        if self.logger_count % 50 == 0:
+        if self.logger_count % 50 == 0 and (move.shape[0] > 0 and grid.shape[0] > 0 and fine.shape[0] > 0):
             i = self.logger_count
             t_move = move
             move_norm = move.norm(dim=-1)
@@ -328,26 +388,32 @@ class NGPDradianceField(NGPradianceField):
     def query_density(self, x, timestamps, time_id: torch.Tensor = None, return_feat: bool = False, dir: torch.Tensor = None):
 
         if self.unbounded:
-            x = contract_to_unisphere(x, self.aabb)
+            x, mask = contract_to_unisphere(x, self.aabb)
         else:
             aabb_min, aabb_max = torch.split(self.aabb, self.num_dim, dim=-1)
             x = (x - aabb_min) / (aabb_max - aabb_min)
+            mask=None
             # x_move = (x_move - aabb_min) / (aabb_max - aabb_min)
             # move = ((move - aabb_min) / (aabb_max - aabb_min)
 
         if not self.loose_move:
-            x_move, move, move_norm, grid_move, fine_move = self.xyz_wrap(x, timestamps, time_id=time_id, aabb=self.aabb)
+            x_move, move, move_norm, grid_move, fine_move = self.xyz_wrap(x, timestamps, time_id=time_id, aabb=self.aabb, mask=None)
         else:
             x_move = x
             move_norm = torch.zeros_like(x[:, 0:1])
 
-
         selector = ((x_move > 0.0) & (x_move < 1.0)).all(dim=-1)
         static_feat = self.xyz_encoder(x_move.view(-1, self.num_dim))
 
-        time_encode = self.time_encoder_feat(timestamps, move_norm.detach())
+        if self.use_time_embedding:
+            if self.use_time_attenuation:
+                time_encode = self.time_encoder_feat(timestamps, move_norm.detach())
+            else:
+                time_encode = self.time_encoder(timestamps)
 
-        cat_x = torch.cat([static_feat, time_encode], dim=-1)
+            cat_x = torch.cat([static_feat, time_encode], dim=-1)
+        else:
+            cat_x = static_feat
 
         x = (
             self.mlp_base(cat_x)
@@ -366,7 +432,8 @@ class NGPDradianceField(NGPradianceField):
         if return_feat:
             if self.training:
 
-                self.log_move(move, grid_move, fine_move)
+                if self.viz is not None:
+                    self.log_move(move, grid_move, fine_move)
                 
                 if self.use_feat_predict or self.use_weight_predict:
                     temp_feat = torch.cat([x_move, timestamps], dim=-1)
@@ -420,3 +487,52 @@ class NGPDradianceField(NGPradianceField):
                 density, embedding = self.query_density(positions, timestamps, dir=directions, return_feat=True)
                 rgb = self._query_rgb(directions, embedding=embedding)
                 return rgb, density
+
+
+from einops import rearrange
+def axisangle_to_R(v):
+    """
+    Convert an axis-angle vector to rotation matrix
+    from https://github.com/ActiveVisionLab/nerfmm/blob/main/utils/lie_group_helper.py#L47
+
+    Inputs:
+        v: (3) or (B, 3)
+    
+    Outputs:
+        R: (3, 3) or (B, 3, 3)
+    """
+    v_ndim = v.ndim
+    if v_ndim==1:
+        v = rearrange(v, 'c -> 1 c')
+    zero = torch.zeros_like(v[:, :1]) # (B, 1)
+    skew_v0 = torch.cat([zero, -v[:, 2:3], v[:, 1:2]], 1) # (B, 3)
+    skew_v1 = torch.cat([v[:, 2:3], zero, -v[:, 0:1]], 1)
+    skew_v2 = torch.cat([-v[:, 1:2], v[:, 0:1], zero], 1)
+    skew_v = torch.stack([skew_v0, skew_v1, skew_v2], dim=1) # (B, 3, 3)
+
+    norm_v = rearrange(torch.norm(v, dim=1)+1e-7, 'b -> b 1 1')
+    eye = torch.eye(3, device=v.device)
+    R = eye + (torch.sin(norm_v)/norm_v)*skew_v + \
+        ((1-torch.cos(norm_v))/norm_v**2)*(skew_v@skew_v)
+    if v_ndim==1:
+        R = rearrange(R, '1 c d -> c d')
+    return R
+
+class ExtrPose(nn.Module):
+    def __init__(
+        self,
+        training_size,
+        device,
+    ) -> None:
+        super().__init__()
+
+        N = training_size
+        self.register_parameter('dR',
+            nn.Parameter(torch.zeros(N, 3, device=device)))
+        self.register_parameter('dT',
+            nn.Parameter(torch.zeros(N, 3, device=device)))
+
+    def forward(self, img_idx, poses):
+        dR = axisangle_to_R(self.dR[img_idx])
+        poses[..., :3] = dR @ poses[..., :3]
+        poses[..., 3] += self.dT[img_idx]

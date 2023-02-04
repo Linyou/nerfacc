@@ -63,7 +63,6 @@ class ContractionType(Enum):
 
 
 @torch.no_grad()
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def contract(
     x: torch.Tensor,
     roi: torch.Tensor,
@@ -84,7 +83,6 @@ def contract(
 
 
 @torch.no_grad()
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def contract_inv(
     x: torch.Tensor,
     roi: torch.Tensor,

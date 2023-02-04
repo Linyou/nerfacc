@@ -26,6 +26,37 @@ std::vector<torch::Tensor> ray_marching(
     const float step_size,
     const float cone_angle);
 
+std::vector<torch::Tensor> ray_marching_test(
+    const int n_rays,
+    const int N_samples,
+    // rays
+    const torch::Tensor rays_o,
+    const torch::Tensor rays_d,
+    const torch::Tensor t_min,
+    const torch::Tensor t_max,
+    // occupancy grid & contraction
+    const torch::Tensor roi,
+    const torch::Tensor grid_binary,
+    const ContractionType type,
+    // sampling
+    const float step_size,
+    const float cone_angle);
+
+std::vector<torch::Tensor> ray_marching_test_v2(
+    const int N_samples,
+    // rays
+    const torch::Tensor rays_o,
+    const torch::Tensor rays_d,
+    torch::Tensor t_min,
+    torch::Tensor t_max,
+    // occupancy grid & contraction
+    const torch::Tensor roi,
+    const torch::Tensor grid_binary,
+    const ContractionType type,
+    // sampling
+    const float step_size,
+    const float cone_angle);
+
 torch::Tensor unpack_info(
     const torch::Tensor packed_info, const int n_samples);
 
@@ -144,6 +175,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     // marching
     m.def("ray_aabb_intersect", &ray_aabb_intersect);
     m.def("ray_marching", &ray_marching);
+    m.def("ray_marching_test", &ray_marching_test);
+    m.def("ray_marching_test_v2", &ray_marching_test_v2);
     m.def("ray_resampling", &ray_resampling);
 
     // rendering

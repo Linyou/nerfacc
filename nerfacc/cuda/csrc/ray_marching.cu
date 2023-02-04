@@ -189,6 +189,7 @@ __global__ void ray_marching_kernel(
     return;
 }
 
+
 std::vector<torch::Tensor> ray_marching(
     // rays
     const torch::Tensor rays_o,
@@ -284,6 +285,373 @@ std::vector<torch::Tensor> ray_marching(
         t_ends.data_ptr<float>());
 
     return {packed_info, ray_indices, t_starts, t_ends};
+}
+
+__global__ void ray_marching_test_kernel(
+    int *num_steps,
+    const uint32_t N_samples,
+    // rays info
+    const uint32_t n_rays,
+    const float *rays_o, // shape (n_rays, 3)
+    const float *rays_d, // shape (n_rays, 3)
+    float *t_min,  // shape (n_rays,)
+    float *t_max,  // shape (n_rays,)
+    // occupancy grid & contraction
+    const float *roi,
+    const int3 grid_res,
+    const bool *grid_binary, // shape (reso_x, reso_y, reso_z)
+    const ContractionType type,
+    // sampling
+    const float step_size,
+    const float cone_angle,
+    // first round outputs
+    // second round outputs
+    bool *valid_mask,
+    long *ray_indices,
+    float *t_starts,
+    float *t_ends)
+{
+    CUDA_GET_THREAD_ID(i, n_rays);
+
+    // locate
+    rays_o += i * 3;
+    rays_d += i * 3;
+    t_min += i;
+    t_max += i;
+
+    num_steps += i;
+
+    int base = i;
+    t_starts += base * N_samples;
+    t_ends += base * N_samples;
+    valid_mask += base * N_samples;
+    ray_indices += base * N_samples;
+
+    const float3 origin = make_float3(rays_o[0], rays_o[1], rays_o[2]);
+    const float3 dir = make_float3(rays_d[0], rays_d[1], rays_d[2]);
+    const float3 inv_dir = 1.0f / dir;
+    const float near = t_min[0], far = t_max[0];
+
+    const float3 roi_min = make_float3(roi[0], roi[1], roi[2]);
+    const float3 roi_max = make_float3(roi[3], roi[4], roi[5]);
+
+    // TODO: compute dt_max from occ resolution.
+    float dt_min = step_size;
+    float dt_max = 1e10f;
+
+    float t0 = near;
+    float dt = calc_dt(t0, cone_angle, dt_min, dt_max);
+    float t1 = t0 + dt;
+    float t_mid = (t0 + t1) * 0.5f;
+
+    int s = 0;
+
+    while (t_mid < far && s<N_samples)
+    {
+        // current center
+        const float3 xyz = origin + t_mid * dir;
+        if (grid_occupied_at(xyz, roi_min, roi_max, type, grid_res, grid_binary))
+        {
+            t_starts[s] = t0;
+            t_ends[s] = t1;
+            valid_mask[s] = true;
+            t_min[0] = t1;
+            ray_indices[s] = i;
+            ++s;
+
+            // march to next sample
+            t0 = t1;
+            t1 = t0 + calc_dt(t0, cone_angle, dt_min, dt_max);
+            t_mid = (t0 + t1) * 0.5f;
+
+        }
+        else
+        {
+            // march to next sample
+            switch (type)
+            {
+            case ContractionType::AABB:
+                // no contraction
+                t_mid = advance_to_next_voxel(
+                    t_mid, dt_min, xyz, dir, inv_dir, roi_min, roi_max, grid_res);
+                dt = calc_dt(t_mid, cone_angle, dt_min, dt_max);
+                t0 = t_mid - dt * 0.5f;
+                t1 = t_mid + dt * 0.5f;
+                break;
+
+            default:
+                // any type of scene contraction does not work with DDA.
+                t0 = t1;
+                t1 = t0 + calc_dt(t0, cone_angle, dt_min, dt_max);
+                t_mid = (t0 + t1) * 0.5f;
+                break;
+            }
+        }
+    }
+
+    num_steps[0] = s;
+
+    return;
+}
+
+__global__ void ray_marching_test_kernel_v2(
+    const uint32_t N_samples,
+    // rays info
+    const uint32_t n_rays,
+    const float *rays_o, // shape (n_rays, 3)
+    const float *rays_d, // shape (n_rays, 3)
+    const float *t_min,  // shape (n_rays,)
+    const float *t_max,  // shape (n_rays,)
+    // occupancy grid & contraction
+    const float *roi,
+    const int3 grid_res,
+    const bool *grid_binary, // shape (reso_x, reso_y, reso_z)
+    const ContractionType type,
+    // sampling
+    const float step_size,
+    const float cone_angle,
+    bool *packed_info,
+    // first round outputs
+    int *num_steps,
+    // second round outputs
+    long *ray_indices,
+    float *t_starts,
+    float *t_ends)
+{
+    CUDA_GET_THREAD_ID(i, n_rays);
+
+    // locate
+    rays_o += i * 3;
+    rays_d += i * 3;
+    t_min += i;
+    t_max += i;
+
+    int base = i;
+    int steps = N_samples;
+    t_starts += base*steps;
+    t_ends += base*steps;
+    ray_indices += base*steps;
+    packed_info += base*steps;
+
+
+    const float3 origin = make_float3(rays_o[0], rays_o[1], rays_o[2]);
+    const float3 dir = make_float3(rays_d[0], rays_d[1], rays_d[2]);
+    const float3 inv_dir = 1.0f / dir;
+    const float near = t_min[0], far = t_max[0];
+
+    const float3 roi_min = make_float3(roi[0], roi[1], roi[2]);
+    const float3 roi_max = make_float3(roi[3], roi[4], roi[5]);
+
+    // TODO: compute dt_max from occ resolution.
+    float dt_min = step_size;
+    float dt_max = 1e10f;
+
+    int j = 0;
+    float t0 = near;
+    float dt = calc_dt(t0, cone_angle, dt_min, dt_max);
+    float t1 = t0 + dt;
+    float t_mid = (t0 + t1) * 0.5f;
+
+    while (t_mid < far && j<N_samples)
+    {
+        // current center
+        const float3 xyz = origin + t_mid * dir;
+        if (grid_occupied_at(xyz, roi_min, roi_max, type, grid_res, grid_binary))
+        {
+
+            t_starts[j] = t0;
+            t_ends[j] = t1;
+            ray_indices[j] = i;
+            packed_info[j] = true;
+
+            ++j;
+            // march to next sample
+            t0 = t1;
+            t1 = t0 + calc_dt(t0, cone_angle, dt_min, dt_max);
+            t_mid = (t0 + t1) * 0.5f;
+        }
+        else
+        {
+            // march to next sample
+            switch (type)
+            {
+            case ContractionType::AABB:
+                // no contraction
+                t_mid = advance_to_next_voxel(
+                    t_mid, dt_min, xyz, dir, inv_dir, roi_min, roi_max, grid_res);
+                dt = calc_dt(t_mid, cone_angle, dt_min, dt_max);
+                t0 = t_mid - dt * 0.5f;
+                t1 = t_mid + dt * 0.5f;
+                break;
+
+            default:
+                // any type of scene contraction does not work with DDA.
+                t0 = t1;
+                t1 = t0 + calc_dt(t0, cone_angle, dt_min, dt_max);
+                t_mid = (t0 + t1) * 0.5f;
+                break;
+            }
+        }
+    }
+
+    return;
+}
+
+std::vector<torch::Tensor> ray_marching_test(
+    const int n_rays,
+    const int N_samples,
+    // rays
+    const torch::Tensor rays_o,
+    const torch::Tensor rays_d,
+    torch::Tensor t_min,
+    torch::Tensor t_max,
+    // occupancy grid & contraction
+    const torch::Tensor roi,
+    const torch::Tensor grid_binary,
+    const ContractionType type,
+    // sampling
+    const float step_size,
+    const float cone_angle)
+{
+    DEVICE_GUARD(rays_o);
+
+    CHECK_INPUT(rays_o);
+    CHECK_INPUT(rays_d);
+    CHECK_INPUT(t_min);
+    CHECK_INPUT(t_max);
+    CHECK_INPUT(roi);
+    CHECK_INPUT(grid_binary);
+    TORCH_CHECK(rays_o.ndimension() == 2 & rays_o.size(1) == 3)
+    TORCH_CHECK(rays_d.ndimension() == 2 & rays_d.size(1) == 3)
+    TORCH_CHECK(t_min.ndimension() == 1)
+    TORCH_CHECK(t_max.ndimension() == 1)
+    TORCH_CHECK(roi.ndimension() == 1 & roi.size(0) == 6)
+    TORCH_CHECK(grid_binary.ndimension() == 3)
+
+    // const int n_rays = n_rays.size(0);
+    const int3 grid_res = make_int3(
+        grid_binary.size(0), grid_binary.size(1), grid_binary.size(2));
+
+    const int threads = 256;
+    const int blocks = CUDA_N_BLOCKS_NEEDED(n_rays, threads);
+
+    // output samples starts and ends
+    int total_steps = n_rays * N_samples;
+    torch::Tensor t_starts = torch::empty({total_steps, 1}, rays_o.options());
+    torch::Tensor t_ends = torch::empty({total_steps, 1}, rays_o.options());
+    // torch::Tensor valid_mask = torch::empty({total_steps,}, 
+    //                             torch::dtype(torch::kInt32).device(rays_o.device()));
+    torch::Tensor valid_mask = torch::zeros({total_steps}, rays_o.options().dtype(torch::kBool));
+
+    torch::Tensor num_steps = torch::zeros({n_rays}, 
+                                torch::dtype(torch::kInt32).device(rays_o.device()));
+
+    // output ray indices
+    torch::Tensor ray_indices = torch::empty({total_steps}, 
+                                torch::dtype(torch::kLong).device(rays_o.device()));
+
+    ray_marching_test_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        num_steps.data_ptr<int>(),
+        N_samples,
+        // rays
+        n_rays,
+        rays_o.data_ptr<float>(),
+        rays_d.data_ptr<float>(),
+        t_min.data_ptr<float>(),
+        t_max.data_ptr<float>(),
+        // occupancy grid & contraction
+        roi.data_ptr<float>(),
+        grid_res,
+        grid_binary.data_ptr<bool>(),
+        type,
+        // sampling
+        step_size,
+        cone_angle,
+        // outputs
+        valid_mask.data_ptr<bool>(),
+        ray_indices.data_ptr<long>(),
+        t_starts.data_ptr<float>(),
+        t_ends.data_ptr<float>());
+
+    torch::Tensor cum_steps = num_steps.cumsum(0, torch::kInt32);
+    torch::Tensor packed_info = torch::stack({cum_steps - num_steps, num_steps}, 1);
+
+    // ray_indices = ray_indices.index({valid_mask});
+    // t_starts = t_starts.index({valid_mask});
+    // t_ends = t_ends.index({valid_mask});
+
+    return {packed_info, ray_indices, t_starts, t_ends, valid_mask};
+}
+
+std::vector<torch::Tensor> ray_marching_test_v2(
+    const int N_samples,
+    // rays
+    const torch::Tensor rays_o,
+    const torch::Tensor rays_d,
+    torch::Tensor t_min,
+    torch::Tensor t_max,
+    // occupancy grid & contraction
+    const torch::Tensor roi,
+    const torch::Tensor grid_binary,
+    const ContractionType type,
+    // sampling
+    const float step_size,
+    const float cone_angle)
+{
+    DEVICE_GUARD(rays_o);
+
+    CHECK_INPUT(rays_o);
+    CHECK_INPUT(rays_d);
+    CHECK_INPUT(t_min);
+    CHECK_INPUT(t_max);
+    CHECK_INPUT(roi);
+    CHECK_INPUT(grid_binary);
+    TORCH_CHECK(rays_o.ndimension() == 2 & rays_o.size(1) == 3)
+    TORCH_CHECK(rays_d.ndimension() == 2 & rays_d.size(1) == 3)
+    TORCH_CHECK(t_min.ndimension() == 1)
+    TORCH_CHECK(t_max.ndimension() == 1)
+    TORCH_CHECK(roi.ndimension() == 1 & roi.size(0) == 6)
+    TORCH_CHECK(grid_binary.ndimension() == 3)
+
+    const int n_rays = rays_o.size(0);
+    const int3 grid_res = make_int3(
+        grid_binary.size(0), grid_binary.size(1), grid_binary.size(2));
+
+    const int threads = 256;
+    const int blocks = CUDA_N_BLOCKS_NEEDED(n_rays, threads);
+
+    // output samples starts and ends
+    // int total_steps = cum_steps[cum_steps.size(0) - 1].item<int>();
+    int total_steps = n_rays * N_samples;
+    torch::Tensor t_starts = torch::empty({total_steps, 1}, rays_o.options());
+    torch::Tensor t_ends = torch::empty({total_steps, 1}, rays_o.options());
+    torch::Tensor ray_indices = torch::empty({total_steps}, rays_o.options().dtype(torch::kLong));
+    torch::Tensor valid_mask = torch::zeros({total_steps}, rays_o.options().dtype(torch::kBool));
+
+    ray_marching_test_kernel_v2<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        N_samples,
+        // rays
+        n_rays,
+        rays_o.data_ptr<float>(),
+        rays_d.data_ptr<float>(),
+        t_min.data_ptr<float>(),
+        t_max.data_ptr<float>(),
+        // occupancy grid & contraction
+        roi.data_ptr<float>(),
+        grid_res,
+        grid_binary.data_ptr<bool>(),
+        type,
+        // sampling
+        step_size,
+        cone_angle,
+        valid_mask.data_ptr<bool>(),
+        // outputs
+        nullptr, /* num_steps */
+        ray_indices.data_ptr<long>(),
+        t_starts.data_ptr<float>(),
+        t_ends.data_ptr<float>());
+
+    return {valid_mask, ray_indices, t_starts, t_ends};
 }
 
 // ----------------------------------------------------------------------------

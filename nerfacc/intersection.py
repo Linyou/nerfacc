@@ -8,10 +8,19 @@ import torch
 from torch import Tensor
 
 import nerfacc.cuda as _C
+from torch.cuda.amp import custom_fwd, custom_bwd
+
+# class RayAABBIntersector(torch.autograd.Function):
+#     @staticmethod
+#     @custom_fwd(cast_inputs=torch.float32)
+#     def forward(ctx, rays_o, rays_d, aabb):
+#         rays_o = rays_o.contiguous()
+#         rays_d = rays_d.contiguous()
+#         aabb = aabb.contiguous()
+#         return _C.ray_aabb_intersect(rays_o, rays_d, aabb)
 
 
 @torch.no_grad()
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def ray_aabb_intersect(
     rays_o: Tensor, rays_d: Tensor, aabb: Tensor
 ) -> Tuple[Tensor, Tensor]:
@@ -46,6 +55,7 @@ def ray_aabb_intersect(
         rays_d = rays_d.contiguous()
         aabb = aabb.contiguous()
         t_min, t_max = _C.ray_aabb_intersect(rays_o, rays_d, aabb)
+        # t_min, t_max = RayAABBIntersector.apply(rays_o, rays_d, aabb)
     else:
         raise NotImplementedError("Only support cuda inputs.")
     return t_min, t_max

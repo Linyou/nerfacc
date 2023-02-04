@@ -68,31 +68,37 @@ def get_rays(K, pose, width, height, opengl=True):
         directions, dim=-1, keepdims=True
     )
 
-    origins = torch.reshape(origins, (height, width, 3)).to(torch.float16)
-    viewdirs = torch.reshape(viewdirs, (height, width, 3)).to(torch.float16)
-    directions = torch.reshape(directions, (height, width, 3)).to(torch.float16)
+    # origins = torch.reshape(origins, (height, width, 3)).to(torch.float16)
+    # viewdirs = torch.reshape(viewdirs, (height, width, 3)).to(torch.float16)
+    # directions = torch.reshape(directions, (height, width, 3)).to(torch.float16)
+    origins = torch.reshape(origins, (height, width, 3))
+    viewdirs = torch.reshape(viewdirs, (height, width, 3))
+    directions = torch.reshape(directions, (height, width, 3))
 
-    rays = Rays(origins=origins, viewdirs=directions)
+    rays = Rays(origins=origins, viewdirs=viewdirs)
 
     return rays
 
 
 class OrbitCamera:
-    def __init__(self, K, img_wh, pose, r):
+    def __init__(self, K, img_wh, pose, r, center=None):
         self.K = K
         self.W, self.H = img_wh
         self.radius = r
         pose_np = pose.cpu().numpy()
-        self.center = np.zeros(3)
-        # self.rot = np.eye(3)
+        if center is not None:
+            self.center = center
+        else:
+            self.center = np.zeros(3)
+        self.rot = np.eye(3)
         # self.center = pose_np[20][:3, 3]
-        self.rot = pose_np[20][:3, :3]
+        # self.rot = pose_np[50][:3, :3]
         self.res_defalut = pose_np[20]
         self.rotate_speed = 0.8
 
         self.inner_rot = np.eye(3)
 
-    def reset(self, pose=None):
+    def reset(self, pose=None, aabb=None):
         self.rot = np.eye(3)
         self.inner_rot = np.eye(3)
         self.center = np.zeros(3)
@@ -144,148 +150,33 @@ class OrbitCamera:
 
 
 class NGPGUI:
-    def __init__(self, radius=4.5, args=None, render_kwargs=None):
+    def __init__(self, radius=2.5, render_kwargs=None):
 
         device = "cuda:0"
-        render_n_samples = 1024
 
-        if args is not None:
-            self.hparams = args
+        self.train_dataset = render_kwargs['train_dataset']
+        self.test_dataset = render_kwargs['test_dataset']
 
-            # setup the dataset
-            train_dataset_kwargs = {}
-            test_dataset_kwargs = {}
+        self.radiance_field = render_kwargs['radiance_field']
+        self.occupancy_grid = render_kwargs['occupancy_grid']
 
-            if args.unbounded:
-                from datasets.dnerf_3d_video import SubjectLoader
+        self.contraction_type = render_kwargs['contraction_type']
+        self.scene_aabb = render_kwargs['scene_aabb']
+        self.near_plane = render_kwargs['near_plane']
+        self.far_plane = render_kwargs['far_plane']
+        self.render_step_size = render_kwargs['render_step_size']
+        self.alpha_thre = render_kwargs['alpha_thre']
 
-                data_root_fp = "/home/loyot/workspace/Datasets/NeRF/3d_vedio_datasets/"
-                target_sample_batch_size = 1 << 20
-                train_dataset_kwargs = {"color_bkgd_aug": "random", "factor": 2}
-                test_dataset_kwargs = {"factor": 2}
-                grid_resolution = 256
-            else:
-                from datasets.dnerf_synthetic import SubjectLoader
-
-                data_root_fp = "/home/loyot/workspace/Datasets/NeRF/dynamic_data/"
-                target_sample_batch_size = 1 << 18
-                grid_resolution = 128
-
-            train_dataset = SubjectLoader(
-                subject_id=args.scene,
-                root_fp=data_root_fp,
-                split=args.train_split,
-                num_rays=target_sample_batch_size // render_n_samples,
-                **train_dataset_kwargs,
-            )
-
-            train_dataset.camtoworlds = train_dataset.camtoworlds.to(device)
-            train_dataset.K = train_dataset.K.to(device)
-
-            test_dataset = SubjectLoader(
-                subject_id=args.scene,
-                root_fp=data_root_fp,
-                split="test",
-                num_rays=None,
-                **test_dataset_kwargs,
-            )
-
-            test_dataset.camtoworlds = test_dataset.camtoworlds.to(device)
-            test_dataset.K = test_dataset.K.to(device)
-
-            self.train_dataset = train_dataset
-            self.test_dataset = test_dataset
-
-            if args.auto_aabb:
-                camera_locs = torch.cat(
-                    [train_dataset.camtoworlds, test_dataset.camtoworlds]
-                )[:, :3, -1]
-                args.aabb = torch.cat(
-                    [camera_locs.min(dim=0).values, camera_locs.max(dim=0).values]
-                ).tolist()
-                print("Using auto aabb", args.aabb)
-
-            # setup the scene bounding box.
-            if args.unbounded:
-                print("Using unbounded rendering")
-                self.contraction_type = ContractionType.UN_BOUNDED_SPHERE
-                # contraction_type = ContractionType.UN_BOUNDED_TANH
-                self.scene_aabb = None
-                self.near_plane = 0.2
-                self.far_plane = 1e2
-                self.render_step_size = 1e-2
-                self.alpha_thre = 1e-2
-            else:
-                self.contraction_type = ContractionType.AABB
-                self.scene_aabb = torch.tensor(args.aabb, dtype=torch.float16, device=device)
-                self.near_plane = None
-                self.far_plane = None
-                self.render_step_size = (
-                    (self.scene_aabb[3:] - self.scene_aabb[:3]).max()
-                    * math.sqrt(3)
-                    / render_n_samples
-                ).item()
-                self.alpha_thre = 0.0
-
-            self.cone_angle = args.cone_angle
-            self.test_chunk_size = args.test_chunk_size
-            self.render_bkgd = torch.ones(3, device=device)
-            
-            # setup the radiance field we want to train.
-            self.radiance_field = NGPDradianceField(
-                # dnerf=dnerf_radiance_field,
-                aabb=args.aabb,
-                unbounded=args.unbounded,
-                use_feat_predict=args.use_feat_predict,
-                use_weight_predict=args.use_weight_predict,
-                moving_step=args.moving_step,
-                use_dive_offsets=args.use_dive_offsets,
-                use_time_embedding=args.use_time_embedding,
-                use_time_attenuation=args.use_time_attenuation,
-                hash_level=args.hash_level,
-            ).to(device)
-
-            self.occupancy_grid = OccupancyGrid(
-                roi_aabb=args.aabb,
-                resolution=grid_resolution,
-                contraction_type=self.contraction_type,
-            ).to(device)
-
-            # loading pretrained model
-            if args.pretrained_model_path == '':
-                # generate log fir for test image and psnr
-                feat_dir, _ = get_feat_dir_and_loss(args)
-                
-                str_lr = str(args.lr).replace('.', '-')
-                root = '/home/loyot/workspace/code/training_results/nerfacc/checkpoints'
-                model_path = root + f'/ngp_dnerf_lr_{str_lr}_{feat_dir}_{args.scene}_20000.pth'
-                # state_dict = torch.load(args.pretrained_model_path)
-                state_dict = torch.load(model_path)
-                self.radiance_field.load_state_dict(state_dict["radiance_field"])
-                self.occupancy_grid.load_state_dict(state_dict["occupancy_grid"])
-        else:
-            self.train_dataset = render_kwargs['train_dataset']
-            self.test_dataset = render_kwargs['test_dataset']
-
-            self.radiance_field = render_kwargs['radiance_field']
-            self.occupancy_grid = render_kwargs['occupancy_grid']
-
-            self.contraction_type = render_kwargs['contraction_type']
-            self.scene_aabb = render_kwargs['scene_aabb']
-            self.near_plane = render_kwargs['near_plane']
-            self.far_plane = render_kwargs['far_plane']
-            self.render_step_size = render_kwargs['render_step_size']
-            self.alpha_thre = render_kwargs['alpha_thre']
-    
-            self.cone_angle = render_kwargs['cone_angle']
-            self.test_chunk_size = render_kwargs['test_chunk_size']
-            self.render_bkgd = render_kwargs['render_bkgd']
+        self.cone_angle = render_kwargs['cone_angle']
+        self.test_chunk_size = render_kwargs['test_chunk_size']
+        self.render_bkgd = render_kwargs['render_bkgd']
+        self.args_aabb = render_kwargs['args_aabb']
 
 
         # self.radiance_field.eval()
         # self.occupancy_grid.eval()
 
-        K, img_wh, pose = self.train_dataset.K, (self.train_dataset.width, self.train_dataset.height), self.train_dataset.camtoworlds
+        K, img_wh, pose = self.test_dataset.K, (self.test_dataset.width, self.test_dataset.height), self.test_dataset.camtoworlds
 
         self.cam = OrbitCamera(K, img_wh, pose, r=radius)
         self.W, self.H = img_wh
@@ -297,7 +188,7 @@ class NGPGUI:
 
 
         self.timestamps = torch.tensor([0.0], device=device)
-        self.max_samples = 50
+        self.max_samples = 100
 
     @torch.no_grad()
     def render_cam(self, cam):
@@ -307,7 +198,7 @@ class NGPGUI:
             rays = get_rays(cam.K, torch.cuda.FloatTensor(cam.pose), self.W, self.H)
             # print(rays.viewdirs.dtype)
 
-            # rendering
+            # nerfacc rendering 
             # rgb, _, depth, n_rendering_samples, _ = render_image(
             #     self.radiance_field,
             #     self.occupancy_grid,
@@ -322,9 +213,10 @@ class NGPGUI:
             #     alpha_thre=self.alpha_thre,
             #     # test options
             #     test_chunk_size=self.test_chunk_size,
-            #     timestamps=self.timestamps,
+            #     # timestamps=self.timestamps,
             # )
 
+            # ngp test rendering (samples level)
             # rgb, _, depth, n_rendering_samples = render_image_test(
             #     self.max_samples,
             #     self.radiance_field,
@@ -340,10 +232,11 @@ class NGPGUI:
             #     alpha_thre=self.alpha_thre,
             #     # test options
             #     # test_chunk_size=self.test_chunk_size,
-            #     timestamps=self.timestamps,
+            #     # timestamps=self.timestamps,
             #     early_stop_eps=0.01,
             # )
 
+            # ngp test rendering v2 (ngp + nerfacc)
             # rgb, _, depth, n_rendering_samples, _ = render_image_test_v2(
             #     self.max_samples,
             #     self.radiance_field,
@@ -359,8 +252,8 @@ class NGPGUI:
             #     alpha_thre=self.alpha_thre,
             #     # test options
             #     test_chunk_size=self.test_chunk_size,
-            #     timestamps=self.timestamps,
-            #     # early_stop_eps=0.01,
+            #     # timestamps=self.timestamps,
+            #     early_stop_eps=0.01,
             # )
 
             # ngp test rendering v3 (rays level)
@@ -378,9 +271,8 @@ class NGPGUI:
                 cone_angle=self.cone_angle,
                 # test options
                 # test_chunk_size=self.test_chunk_size,
-                timestamps=self.timestamps,
-                # alpha_thre=0.0,
-                # early_stop_eps=0.0,
+                # timestamps=self.timestamps,
+                # early_stop_eps=0.01,
             )
 
             depth = depth.squeeze(-1)
@@ -400,7 +292,7 @@ class NGPGUI:
 def write_buffer(W:ti.i32, H:ti.i32, x: ti.types.ndarray(), final_pixel:ti.template()):
     for i, j in ti.ndrange(W, H):
         for p in ti.static(range(3)):
-            final_pixel[i, j][p] = x[H-1-j, i, p]
+            final_pixel[i, j][p] = x[j, i, p]
 
 
 @torch.no_grad()
@@ -457,6 +349,8 @@ def render_gui(ngp=None, args=None):
     train_view = 0
     last_train_view = 0
     last_test_view = 0
+
+    ref_c2w = ngp.train_dataset.camtoworlds[train_view].cpu().numpy()
 
     train_views_size = ngp.train_dataset.images.shape[0]-1
     test_views_size = ngp.test_dataset.images.shape[0]-1
@@ -531,14 +425,37 @@ def render_gui(ngp=None, args=None):
 
             if last_train_view != train_view:
                 last_train_view = train_view
-                ngp.cam.reset(ngp.train_dataset.camtoworlds[train_view])
+                ref_c2w = ngp.train_dataset.camtoworlds[train_view].cpu().numpy()
+                ngp.cam.reset(
+                    ngp.train_dataset.camtoworlds[train_view],
+                    aabb=ngp.args_aabb
+                )
 
             if last_test_view != test_view:
                 last_test_view = test_view
-                ngp.cam.reset(ngp.test_dataset.camtoworlds[test_view])
+                ngp.cam.reset(
+                    ngp.test_dataset.camtoworlds[test_view],
+                    aabb=ngp.args_aabb
+                )
 
+            cam_pose = ngp.cam.pose
             w.text(f'samples per rays: {ngp.mean_samples} s/r')
             w.text(f'render times: {1000*ngp.dt:.2f} ms')
+            w.text(f'radius: {ngp.cam.radius}')
+            w.text(f'pose:')
+            w.text(f'{ngp.cam.rot[0]}')
+            w.text(f'{ngp.cam.rot[1]}')
+            w.text(f'{ngp.cam.rot[2]}')
+            w.text(f'c2w:')
+            w.text(f'{cam_pose[0]}')
+            w.text(f'{cam_pose[1]}')
+            w.text(f'{cam_pose[2]}')
+            w.text(f'{cam_pose[2]}')
+            w.text(f'ref c2w:')
+            w.text(f'{ref_c2w[0]}')
+            w.text(f'{ref_c2w[1]}')
+            w.text(f'{ref_c2w[2]}')
+            w.text(f'{ref_c2w[2]}')
 
         render_buffer = ngp.render_frame()
         write_buffer(W, H, render_buffer, final_pixel)
@@ -549,6 +466,10 @@ def render_gui(ngp=None, args=None):
 if __name__ == "__main__":
     hparams = get_opts()
 
-    ngp = NGPGUI(args=hparams)
+    args = get_ngp_args(hparams)
+    ngp = NGPGUI(render_kwargs=args)
+
+    # ngp = NGPGUI(args=hparams)
 
     render_gui(ngp)
+

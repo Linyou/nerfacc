@@ -11,6 +11,7 @@ import nerfacc.cuda as _C
 
 from .pack import pack_info
 import torch.nn.functional as F
+from torch.cuda.amp import custom_fwd, custom_bwd
 
 def rendering(
     # ray marching results
@@ -126,10 +127,132 @@ def rendering(
     if render_bkgd is not None:
         colors = colors + render_bkgd * (1.0 - opacities)
 
-    return colors, opacities, depths
+    return colors, opacities, depths, weights
+
+def rendering_test(
+    mask: torch.Tensor,
+    opacities: torch.Tensor,
+    # ray marching results
+    t_starts: torch.Tensor,
+    t_ends: torch.Tensor,
+    ray_indices: torch.Tensor,
+    n_rays: int,
+    # radiance field
+    rgb_sigma_fn: Optional[Callable] = None,
+    rgb_alpha_fn: Optional[Callable] = None,
+    # rendering options
+    render_bkgd: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if rgb_sigma_fn is None and rgb_alpha_fn is None:
+        raise ValueError(
+            "At least one of `rgb_sigma_fn` and `rgb_alpha_fn` should be specified."
+        )
+
+    # Query sigma/alpha and color with gradients
+    if rgb_sigma_fn is not None:
+        rgbs, sigmas = rgb_sigma_fn(t_starts, t_ends, ray_indices, mask)
+        assert rgbs.shape[-1] == 3, "rgbs must have 3 channels, got {}".format(
+            rgbs.shape
+        )
+        assert (
+            sigmas.shape == t_starts.shape
+        ), "sigmas must have shape of (N, 1)! Got {}".format(sigmas.shape)
+        # Rendering: compute weights.
+        weights = render_weight_from_density_prefix(
+            opacities,
+            t_starts,
+            t_ends,
+            sigmas,
+            ray_indices=ray_indices,
+            n_rays=n_rays,
+        )
+    elif rgb_alpha_fn is not None:
+        rgbs, alphas = rgb_alpha_fn(t_starts, t_ends, ray_indices)
+        assert rgbs.shape[-1] == 3, "rgbs must have 3 channels, got {}".format(
+            rgbs.shape
+        )
+        assert (
+            alphas.shape == t_starts.shape
+        ), "alphas must have shape of (N, 1)! Got {}".format(alphas.shape)
+        # Rendering: compute weights.
+        weights = render_weight_from_alpha(
+            alphas,
+            ray_indices=ray_indices,
+            n_rays=n_rays,
+        )
+
+    # Rendering: accumulate rgbs, opacities, and depths along the rays.
+    colors = accumulate_along_rays(
+        weights, ray_indices, values=rgbs, n_rays=n_rays
+    )
+    opacities = accumulate_along_rays(
+        weights, ray_indices, values=None, n_rays=n_rays
+    )
+    depths = accumulate_along_rays(
+        weights,
+        ray_indices,
+        values=(t_starts + t_ends) / 2.0,
+        n_rays=n_rays,
+    )
+
+    # Background composition.
+    if render_bkgd is not None:
+        colors = colors + render_bkgd * (1.0 - opacities)
+
+    return colors, opacities, depths, weights
 
 
-@torch.cuda.amp.autocast(dtype=torch.float32)
+from .taichi_modules.volume_render import composite_test
+
+def rendering_test_v2(
+    rgb: torch.Tensor,
+    depth: torch.Tensor,
+    opacity: torch.Tensor,
+    pack_info: torch.Tensor,
+    alive_indices: torch.Tensor,
+    # ray marching results
+    ray_indices: torch.Tensor,
+    t_starts: torch.Tensor,
+    t_ends: torch.Tensor,
+    # radiance field
+    rgb_sigma_fn: Optional[Callable] = None,
+    rgb_alpha_fn: Optional[Callable] = None,
+    early_stop_eps: float = 1e-3,
+    alpha_threshold: float = 0.0,
+):
+    if rgb_sigma_fn is None and rgb_alpha_fn is None:
+        raise ValueError(
+            "At least one of `rgb_sigma_fn` and `rgb_alpha_fn` should be specified."
+        )
+
+    # Query sigma/alpha and color with gradients
+    if rgb_sigma_fn is not None:
+        rgbs, sigmas = rgb_sigma_fn(t_starts, t_ends, alive_indices[ray_indices])
+        assert rgbs.shape[-1] == 3, "rgbs must have 3 channels, got {}".format(
+            rgbs.shape
+        )
+        assert (
+            sigmas.shape == t_starts.shape
+        ), "sigmas must have shape of (N, 1)! Got {}".format(sigmas.shape)
+        # Rendering: compute weights.
+
+    composite_test(
+        # input args
+        sigmas.contiguous(), 
+        rgbs.contiguous(), 
+        t_starts,
+        t_ends, 
+        pack_info, 
+        alive_indices, 
+        early_stop_eps, 
+        alpha_threshold,
+        # output args
+        opacity, depth, rgb
+    )
+
+    return rgb, depth, opacity, alive_indices
+
+
 def accumulate_along_rays(
     weights: Tensor,
     ray_indices: Tensor,
@@ -199,7 +322,6 @@ def accumulate_along_rays(
     return outputs
 
 
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def render_transmittance_from_density(
     t_starts: Tensor,
     t_ends: Tensor,
@@ -268,7 +390,6 @@ def render_transmittance_from_density(
     return transmittance
 
 
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def render_transmittance_from_alpha(
     alphas: Tensor,
     *,
@@ -326,7 +447,6 @@ def render_transmittance_from_alpha(
     return transmittance
 
 
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def render_weight_from_density(
     t_starts: Tensor,
     t_ends: Tensor,
@@ -400,8 +520,39 @@ def render_weight_from_density(
         )
     return weights
 
+def render_weight_from_density_prefix(
+    opacity: Tensor,
+    t_starts: Tensor,
+    t_ends: Tensor,
+    sigmas: Tensor,
+    *,
+    packed_info: Optional[torch.Tensor] = None,
+    ray_indices: Optional[torch.Tensor] = None,
+    n_rays: Optional[int] = None,
+    return_trans: Optional[bool] = False,
+) -> torch.Tensor:
+    assert (
+        ray_indices is not None or packed_info is not None
+    ), "Either ray_indices or packed_info should be provided."
+    if ray_indices is not None and _C.is_cub_available():
+        pre_transmittance = 1. - opacity[ray_indices]
+        transmittance = _RenderingTransmittanceFromDensityCUB.apply(
+            ray_indices, t_starts, t_ends, sigmas
+        )
+        alphas = 1.0 - torch.exp(-sigmas * (t_ends - t_starts))
+        weights = pre_transmittance * transmittance * alphas
+        
+        if return_trans:
+            return weights, alphas
+    else:
+        if packed_info is None:
+            packed_info = pack_info(ray_indices, n_rays=n_rays)
+        weights = _RenderingWeightFromDensityNaive.apply(
+            packed_info, t_starts, t_ends, sigmas
+        )
+    return weights
 
-@torch.cuda.amp.autocast(dtype=torch.float32)
+
 def render_weight_from_alpha(
     alphas: Tensor,
     *,
@@ -459,7 +610,6 @@ def render_weight_from_alpha(
 
 
 @torch.no_grad()
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def render_visibility(
     alphas: torch.Tensor,
     *,
@@ -528,6 +678,39 @@ def render_visibility(
         visibility = visibility & (alphas >= alpha_thre)
     visibility = visibility.squeeze(-1)
     return visibility
+
+@torch.no_grad()
+def render_visibility_prefix(
+    opacities: torch.Tensor,
+    alphas: torch.Tensor,
+    *,
+    ray_indices: Optional[torch.Tensor] = None,
+    packed_info: Optional[torch.Tensor] = None,
+    n_rays: Optional[int] = None,
+    early_stop_eps: float = 1e-4,
+    alpha_thre: float = 0.0,
+) -> torch.Tensor:
+    assert (
+        ray_indices is not None or packed_info is not None
+    ), "Either ray_indices or packed_info should be provided."
+    if ray_indices is not None and _C.is_cub_available():
+        transmittance = _RenderingTransmittanceFromAlphaCUB.apply(
+            ray_indices, alphas
+        )
+    else:
+        if packed_info is None:
+            packed_info = pack_info(ray_indices, n_rays=n_rays)
+        transmittance = _RenderingTransmittanceFromAlphaNaive.apply(
+            packed_info, alphas
+        )
+    visibility = ((1.-opacities[ray_indices]) * transmittance) >= early_stop_eps
+    if alpha_thre > 0:
+        visibility_alpha = visibility & (alphas >= alpha_thre)
+        visibility_alpha = visibility_alpha.squeeze(-1)
+    else:
+        visibility_alpha = None
+    visibility = visibility.squeeze(-1)
+    return visibility, visibility_alpha
 
 
 class _RenderingTransmittanceFromDensityCUB(torch.autograd.Function):

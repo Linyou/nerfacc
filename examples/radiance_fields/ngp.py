@@ -91,7 +91,12 @@ class NGPradianceField(torch.nn.Module):
         self.unbounded = unbounded
 
         self.geo_feat_dim = geo_feat_dim
-        per_level_scale = 1.3195079565048218
+        # per_level_scale = 1.3195079565048218 # 1024
+        # per_level_scale = 1.3819128274917603 # 2048
+        per_level_scale = 1.4472692012786865 # 4096
+        # per_level_scale = 1.515716552734375 # 8192
+        # per_level_scale = 1.587401032447815 # 16384
+        # per_level_scale = 1.662475824356079  # 32768
 
         if self.use_viewdirs:
             self.direction_encoding = tcnn.Encoding(

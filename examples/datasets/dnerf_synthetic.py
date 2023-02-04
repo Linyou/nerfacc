@@ -121,6 +121,8 @@ class SubjectLoader(torch.utils.data.Dataset):
         )  # (3, 3)
         assert self.images.shape[1:3] == (self.HEIGHT, self.WIDTH)
 
+        self.width, self.height = self.WIDTH, self.HEIGHT
+
     def __len__(self):
         return len(self.images)
 

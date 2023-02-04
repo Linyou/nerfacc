@@ -8,8 +8,6 @@ from torch import Tensor
 
 import nerfacc.cuda as _C
 
-
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def pack_data(data: Tensor, mask: Tensor) -> Tuple[Tensor, Tensor]:
     """Pack per-ray data (n_rays, n_samples, D) to (all_samples, D) based on mask.
 
@@ -45,7 +43,6 @@ def pack_data(data: Tensor, mask: Tensor) -> Tuple[Tensor, Tensor]:
 
 
 @torch.no_grad()
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def pack_info(ray_indices: Tensor, n_rays: int = None) -> Tensor:
     """Pack `ray_indices` to `packed_info`. Useful for converting per sample data to per ray data.
 
@@ -80,7 +77,6 @@ def pack_info(ray_indices: Tensor, n_rays: int = None) -> Tensor:
 
 
 @torch.no_grad()
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def unpack_info(packed_info: Tensor, n_samples: int) -> Tensor:
     """Unpack `packed_info` to `ray_indices`. Useful for converting per ray data to per sample data.
 
@@ -123,8 +119,6 @@ def unpack_info(packed_info: Tensor, n_samples: int) -> Tensor:
         raise NotImplementedError("Only support cuda inputs.")
     return ray_indices
 
-
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def unpack_data(
     packed_info: Tensor,
     data: Tensor,

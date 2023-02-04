@@ -6,22 +6,68 @@ import math
 import os
 import time
 
+import apex
 import imageio
 import numpy as np
 import torch
 import torch.nn.functional as F
-import tqdm
+from tqdm import tqdm
 from radiance_fields.custom_ngp import NGPDradianceField
-from utils import render_image, set_random_seed
+from utils import render_image, set_random_seed, namedtuple_map, render_image_test_v3
 from custom_utils import custom_render_image, get_feat_dir_and_loss, get_opts
 from visdom import Visdom
 from radiance_fields.mlp import DNeRFRadianceField
 
 from nerfacc import ContractionType, OccupancyGrid, loss_distortion
-from nerfacc.taichi_modules import distortion
+# from nerfacc.taichi_modules import distortion
 from warmup_scheduler import GradualWarmupScheduler
 
+import cv2
+from torch import Tensor
 import torch.distributed as dist
+from loguru import logger
+
+from torch_efficient_distloss import flatten_eff_distloss, eff_distloss
+
+def depth2img(depth):
+    depth = (depth-depth.min())/(depth.max()-depth.min())
+    depth_img = cv2.applyColorMap((depth*255).cpu().numpy().astype(np.uint8),
+                                  cv2.COLORMAP_TURBO)
+
+    return depth_img
+
+def distortion(
+    ray_ids: Tensor, weights: Tensor, t_starts: Tensor, t_ends: Tensor
+) -> Tensor:
+    """Distortion loss from Mip-NeRF 360 paper, Equ. 15.
+
+    Args:
+        packed_info: Packed info for the samples. (n_rays, 2)
+        weights: Weights for the samples. (all_samples,)
+        t_starts: Per-sample start distance. Tensor with shape (all_samples, 1).
+        t_ends: Per-sample end distance. Tensor with shape (all_samples, 1).
+
+    Returns:
+        Distortion loss. (n_rays,)
+    """
+
+    # （all_samples, 1) -> (n_rays, n_samples)
+    # w = unpack_data(ray_ids, weights).squeeze(-1)
+    # t1 = unpack_data(ray_ids, t_starts).squeeze(-1)
+    # t2 = unpack_data(ray_ids, t_ends).squeeze(-1)
+    # print("interval: ", interval.shape)
+    # print("tmid: ", tmid.shape)
+    # print("weights: ", weights.shape)
+    # print("ray_ids: ", ray_ids.shape)
+
+    interval = t_ends - t_starts
+    tmid = (t_starts + t_ends) / 2
+
+    # interval = t2 - t1
+    # tmid = (t1 + t2) / 2
+
+    # return eff_distloss(w, tmid, interval)
+    return flatten_eff_distloss(weights.squeeze(-1), tmid.squeeze(-1), interval.squeeze(-1), ray_ids)
 
 import taichi as ti
 ti.init(arch=ti.cuda, offline_cache=True)
@@ -66,12 +112,12 @@ def main(args, gui=False):
     train_dataset_kwargs = {}
     test_dataset_kwargs = {}
     if args.unbounded:
-        from datasets.nerf_360_v2 import SubjectLoader
+        from datasets.dnerf_3d_video import SubjectLoader
 
-        data_root_fp = "/home/ruilongli/data/360_v2/"
+        data_root_fp = "/home/loyot/workspace/Datasets/NeRF/3d_vedio_datasets/"
         target_sample_batch_size = 1 << 20
-        train_dataset_kwargs = {"color_bkgd_aug": "random", "factor": 4}
-        test_dataset_kwargs = {"factor": 4}
+        train_dataset_kwargs = {"color_bkgd_aug": "random", "factor": 2}
+        test_dataset_kwargs = {"factor": 2}
         grid_resolution = 256
     else:
         from datasets.dnerf_synthetic import SubjectLoader
@@ -80,22 +126,28 @@ def main(args, gui=False):
         target_sample_batch_size = 1 << 18
         grid_resolution = 128
 
+        # data_root_fp = "/home/loyot/workspace/Datasets/NeRF/3d_vedio_datasets/"
+        # target_sample_batch_size = 1 << 20
+        # train_dataset_kwargs = {"color_bkgd_aug": "random", "factor": 2}
+        # test_dataset_kwargs = {"factor": 2}
+        # grid_resolution = 256
+
     train_dataset = SubjectLoader(
         subject_id=args.scene,
         root_fp=data_root_fp,
         split=args.train_split,
         num_rays=target_sample_batch_size // render_n_samples,
         **train_dataset_kwargs,
-    ).to(device)
+    )
 
-    train_dataset_test = SubjectLoader(
-        subject_id=args.scene,
-        root_fp=data_root_fp,
-        split=args.train_split,
-        num_rays=None,
-        **train_dataset_kwargs,
-    ).to(device)
-    train_dataset_test.training = False
+    # train_dataset_test = SubjectLoader(
+    #     subject_id=args.scene,
+    #     root_fp=data_root_fp,
+    #     split=args.train_split,
+    #     num_rays=None,
+    #     **train_dataset_kwargs,
+    # )
+    # train_dataset_test.training = False
 
     test_dataset = SubjectLoader(
         subject_id=args.scene,
@@ -103,16 +155,51 @@ def main(args, gui=False):
         split="test",
         num_rays=None,
         **test_dataset_kwargs,
-    ).to(device)
+    )
 
     if args.auto_aabb:
         camera_locs = torch.cat(
-            [train_dataset.camtoworlds, test_dataset.camtoworlds]
+            [train_dataset.camtoworlds,]
         )[:, :3, -1]
-        args.aabb = torch.cat(
+        # args.aabb = torch.cat(
+        #     [camera_locs.min(dim=0).values, camera_locs.max(dim=0).values]
+        # ).tolist()
+        aabb_temp = torch.cat(
             [camera_locs.min(dim=0).values, camera_locs.max(dim=0).values]
         ).tolist()
-        print("Using auto aabb", args.aabb)
+        print("Using auto aabb", aabb_temp)
+
+    scale = torch.tensor([
+        3.0, 3.0, 2.0,
+        3.0, 3.0, 4.0
+    ])
+    offset = torch.tensor([
+        0.0,  0.0, 1.0,
+        0.0,  0.0, 1.0
+    ])
+    print("before scene aabb: ", args.aabb)
+    args.aabb = (torch.tensor(args.aabb)*scale + offset).tolist()
+    print("after scene aabb: ", args.aabb)
+
+    # if args.unbounded:
+    train_dataset.update_num_rays(8192)
+
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        num_workers=16,
+        persistent_workers=True,
+        batch_size=None,
+        pin_memory=True
+    )
+    camtoworlds = train_dataset.camtoworlds.to(device)
+
+    # test_dataloader = torch.utils.data.DataLoader(
+    #     test_dataset,
+    #     num_workers=8,
+    #     persistent_workers=True,
+    #     batch_size=None,
+    #     pin_memory=False
+    # )
 
     # setup the scene bounding box.
     if args.unbounded:
@@ -121,7 +208,7 @@ def main(args, gui=False):
         # contraction_type = ContractionType.UN_BOUNDED_TANH
         scene_aabb = None
         near_plane = 0.2
-        far_plane = 1e4
+        far_plane = 1e2
         render_step_size = 1e-2
         alpha_thre = 1e-2
     else:
@@ -135,12 +222,23 @@ def main(args, gui=False):
             / render_n_samples
         ).item()
         alpha_thre = 0.0
+
+        # near_plane = 0.2
+        # # # far_plane = 1e2
+        # render_step_size = 1e-2
+        # alpha_thre = 1e-2
     
     # setup the radiance field we want to train.
     # max_steps = 20000
     max_steps = 20000
-    grad_scaler = torch.cuda.amp.GradScaler(2**10)
-    viz = Visdom()
+    one_epoch = 1000
+    max_epoch = max_steps // one_epoch
+    epochs = 1
+    grad_scaler = torch.cuda.amp.GradScaler()
+    if args.log_visdom:
+        viz = Visdom()
+    else:
+        viz = None
     # dnerf_radiance_field = DNeRFRadianceField().to(device)
     # dnerf_radiance_field.load_state_dict(torch.load('checkpoints/dnerf_lego_30000.pth', map_location=torch.device('cuda')))
     radiance_field = NGPDradianceField(
@@ -152,21 +250,30 @@ def main(args, gui=False):
         use_weight_predict=args.use_weight_predict,
         moving_step=args.moving_step,
         use_dive_offsets=args.use_dive_offsets,
+        use_time_embedding=args.use_time_embedding,
+        use_time_attenuation=args.use_time_attenuation,
+        hash_level=args.hash_level,
     ).to(device)
 
     lr = args.lr
 
-    optimizer = torch.optim.Adam(
-        radiance_field.parameters(), lr=lr, eps=1e-15
-    )
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    optimizer = apex.optimizers.FusedAdam(radiance_field.parameters(), lr, eps=1e-15)
+    # optimizer = torch.optim.Adam(
+    #     radiance_field.parameters(), lr=lr, eps=1e-15
+    # )
+    # scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    #     optimizer,
+    #     milestones=[max_steps // 2, max_steps * 3 // 4, max_steps * 9 // 10],
+    #     # milestones=[max_steps // 2, max_steps * 9 // 10],
+    #     gamma=0.33,
+    # )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        milestones=[max_steps // 2, max_steps * 3 // 4, max_steps * 9 // 10],
-        # milestones=[max_steps // 2, max_steps * 9 // 10],
-        gamma=0.33,
+        max_epoch,
+        lr/30
     )
 
-    scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=100, after_scheduler=scheduler)
+    # scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=100, after_scheduler=scheduler)
 
 
     # scheduler = torch.optim.lr_scheduler.MultiStepLR(
@@ -207,6 +314,11 @@ def main(args, gui=False):
     # p = mp.Process(target=init_process, args=(rank, size, render_gui, args))
     # p.start()
 
+    # logger file
+    results_root = '/home/loyot/workspace/code/training_results/nerfacc'
+    logger.remove(0)
+    logger.add(os.path.join(results_root, 'logs', f'ngp_dnerf_{args.scene}_'+"{time}.log"))
+
     if gui:
         send_dist(radiance_field, occupancy_grid, is_async=False)
 
@@ -218,16 +330,21 @@ def main(args, gui=False):
     step = 0
     tic = time.time()
     # radiance_field.loose_move = True
-    for epoch in range(10000000):
-        for i in range(len(train_dataset)):
-            radiance_field.train()
-            data = train_dataset[i]
 
-            render_bkgd = data["color_bkgd"]
-            rays = data["rays"]
-            pixels = data["pixels"]
-            timestamps = data["timestamps"]
-            idx = data["idx"]
+    progress_bar = tqdm(total=one_epoch, desc=f'epoch: {epochs}/{max_epoch}')
+
+    for epoch in range(10000000):
+        # for i in range(len(train_dataset)):
+        for i, data in enumerate(train_dataloader):
+            radiance_field.train()
+            # data = train_dataset[i]
+
+            render_bkgd = data["color_bkgd"].to(device)
+            # rays = data["rays"]
+            rays = namedtuple_map(lambda r: r.to(device), data["rays"])
+            pixels = data["pixels"].to(device)
+            timestamps = data["timestamps"].to(device)
+            idx = data["idx"].to(device)
 
             def occ_eval_fn(x):
                 if args.cone_angle > 0.0:
@@ -235,7 +352,7 @@ def main(args, gui=False):
                     camera_ids = torch.randint(
                         0, len(train_dataset), (x.shape[0],), device=device
                     )
-                    origins = train_dataset.camtoworlds[camera_ids, :3, -1]
+                    origins = camtoworlds[camera_ids, :3, -1]
                     t = (origins - x).norm(dim=-1, keepdim=True)
                     # compute actual step size used in marching, based on the distance to the camera.
                     step_size = torch.clamp(
@@ -257,12 +374,13 @@ def main(args, gui=False):
                 return density * step_size
 
 
-            # # update occupancy grid
-            occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
-
             # render
             with torch.autocast(device_type='cuda', dtype=torch.float16):
-                if args.use_feat_predict or args.use_weight_predict or args.distortion_loss:
+                # # update occupancy grid
+                occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
+
+
+                if args.use_feat_predict or args.use_weight_predict:
                     radiance_field.return_extra = True
                     rgb, acc, depth, move, n_rendering_samples, extra, extra_info = custom_render_image(
                         radiance_field,
@@ -280,7 +398,7 @@ def main(args, gui=False):
                         # idx=idx,
                     )
                 else:
-                    rgb, acc, depth, n_rendering_samples = render_image(
+                    rgb, acc, depth, n_rendering_samples, extra_info = render_image(
                         radiance_field,
                         occupancy_grid,
                         rays,
@@ -298,21 +416,22 @@ def main(args, gui=False):
                     continue
 
                 # dynamic batch size for rays to keep sample batch size constant.
-                num_rays = len(pixels)
-                num_rays = int(
-                    num_rays
-                    * (target_sample_batch_size / float(n_rendering_samples))
-                )
-                train_dataset.update_num_rays(num_rays)
+                # if not args.unbounded:
+                #     num_rays = len(pixels)
+                #     num_rays = int(
+                #         num_rays
+                #         * (target_sample_batch_size / float(n_rendering_samples))
+                #     )
+                #     train_dataset.update_num_rays(num_rays)
+
                 alive_ray_mask = acc.squeeze(-1) > 0
 
                 # compute loss
-                rec_loss = rec_loss_fn(rgb[alive_ray_mask], pixels[alive_ray_mask], reduction='none')
-                loss = rec_loss.mean()
+                loss = rec_loss_fn(rgb[alive_ray_mask], pixels[alive_ray_mask])
 
                 if args.use_opacity_loss:
                     o = acc[alive_ray_mask]
-                    loss_o = (-o*torch.log(o)).mean()*1e-2
+                    loss_o = (-o*torch.log(o)).mean()*1e-4
                     loss += loss_o
 
                 if args.use_feat_predict:
@@ -329,10 +448,10 @@ def main(args, gui=False):
 
                 if args.distortion_loss:
                     loss_distor = 0.
-                    for (weight, t_starts, t_ends, ray_indices, packed_info) in extra_info:
+                    for (weight, t_starts, t_ends, ray_indices) in extra_info:
                         # alive_samples_mask = alive_ray_mask[ray_indices.long()]
                         # loss_extra += F.smooth_l1_loss(predict[alive_samples_mask], hash_feat[alive_samples_mask])*0.1
-                        loss_distor += distortion(packed_info, weight, t_starts, t_ends)[alive_ray_mask].mean() * 1e-2
+                        loss_distor += distortion(ray_indices, weight, t_starts, t_ends) * 1e-4
                 
                     loss += loss_distor
 
@@ -340,20 +459,22 @@ def main(args, gui=False):
             # do not unscale it because we are using Adam.
             grad_scaler.scale(loss).backward()
             # grad_scaler.unscale_(optimizer)
-            if args.use_feat_predict or args.use_weight_predict:
+            if (args.use_feat_predict or args.use_weight_predict) and args.log_visdom:
                 radiance_field.log_grad(step)
             # optimizer.step()
             grad_scaler.step(optimizer)
             scale = grad_scaler.get_scale()
             grad_scaler.update()
 
-            if not scale > grad_scaler.get_scale():
-                scheduler.step()
 
             if gui:
                 send_dist(radiance_field, occupancy_grid, is_async=True)
 
             if step % 1000 == 0:
+
+                if not scale > grad_scaler.get_scale():
+                    scheduler.step()
+
                 elapsed_time = time.time() - tic
                 loss = F.mse_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
                 loss_log = f"loss={loss:.5f} | "
@@ -363,15 +484,25 @@ def main(args, gui=False):
                 if args.use_weight_predict:
                     loss_log += f"weight={loss_weight:.7f} | "
                 if args.distortion_loss:
-                     loss_log += f"distor={loss_distor:.7f} | "
+                     loss_log += f"dist={loss_distor:.7f} | "
                 if args.use_opacity_loss:
-                    loss_log += f"opac={loss_o:.7f} ||"
-                print(
-                    f"elapsed_time={elapsed_time:.2f}s | step={step} ||",
-                    loss_log,
-                    f"alive_ray_mask={alive_ray_mask.long().sum():d} | "
-                    f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} |"
+                    loss_log += f"opac={loss_o:.7f} | "
+                prog = (
+                    f"e_time={elapsed_time:.2f}s | step={step} | "
+                    f'{loss_log}'
+                    f"alive={alive_ray_mask.long().sum():d} | "
+                    f"n_s={n_rendering_samples:d} | num_rays={len(pixels):d} | "
+                    f"s/ray={n_rendering_samples/len(pixels):.2f}"
                 )
+
+                logger.info(prog)
+                if step != 0:
+                    progress_bar.set_postfix_str(prog)
+                    progress_bar.close()
+                    # progress_bar.set_description_str(f'epoch: {epochs}/{max_epoch}')
+                    if step != max_steps:
+                        epochs+=1
+                        progress_bar = tqdm(total=one_epoch, desc=f'epoch: {epochs}/{max_epoch}')
 
 
                 str_lr = str(lr).replace('.', '-')
@@ -393,7 +524,7 @@ def main(args, gui=False):
                         timestamps = data["timestamps"]
 
                         # rendering
-                        rgb, acc, depth, _, = render_image(
+                        rgb, acc, depth, _, _ = render_image(
                             radiance_field,
                             occupancy_grid,
                             rays,
@@ -415,20 +546,26 @@ def main(args, gui=False):
                         os.makedirs(f'{image_root}', exist_ok=True)
                         assert os.path.exists(f'{image_root}'), f"test images saving path dose not exits! path: {image_root}"
                         # print("depth shape: ", depth.shape)
-
-                        imageio.imwrite(
-                            f"{image_root}/acc_{i_id}_{step}.png",
-                            ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
-                        )
                         imageio.imwrite(
                             f"{image_root}/depth_{i_id}_{step}.png",
-                            (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
+                            depth2img(depth),
                         )
                         imageio.imwrite(
                             f"{image_root}/rgb_{i_id}_{step}.png",
                             (rgb.cpu().numpy() * 255).astype(np.uint8),
                         )
                         print(f"test {i_id} for {step} iter: {psnr}")
+                        # train_dataset.change_split('train')
+
+            prog = (
+                # f"alive_ray_mask={alive_ray_mask.long().sum():d} | "
+                f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d}"
+            )
+
+            progress_bar.set_postfix_str(prog)
+
+            if step != max_steps:
+                progress_bar.update()
 
             if step >= 0 and step % max_steps == 0 and step > 0:
                 str_lr = str(lr).replace('.', '-')
@@ -441,78 +578,84 @@ def main(args, gui=False):
                     },
                     f"{results_root}/checkpoints/ngp_dnerf_lr_{str_lr}_{feat_dir}_{args.scene}_{step}.pth",
                 )
+
                 # evaluation
                 radiance_field.eval()
                 image_root = f'{results_root}/ngp_dnerf/{args.scene}/lr_{str_lr}/{feat_dir}'
                 print('image_root: ', image_root)
 
+                # test_dataset.images = test_dataset.images.to(device)
+                # test_dataset.camtoworlds = test_dataset.camtoworlds.to(device)
+                # test_dataset.K = test_dataset.K.to(device)
+
+
                 with torch.no_grad():
-                    psnrs = []
-                    print("save train image")
 
-                    os.makedirs(f'{image_root}/train', exist_ok=True)
-                    assert os.path.exists(f'{image_root}/train'), f"train images saving path dose not exits! path: {image_root}/train"
+                    if args.unbounded:
 
-                    for i in tqdm.tqdm(range(len(train_dataset_test))):
-                        data = train_dataset_test[i]
-                        render_bkgd = data["color_bkgd"]
-                        rays = data["rays"]
-                        pixels = data["pixels"]
-                        timestamps = data["timestamps"]
+                        psnrs = []
+                        print("save train image")
 
-                        # rendering
-                        rgb, acc, depth, _, = render_image(
-                            radiance_field,
-                            occupancy_grid,
-                            rays,
-                            scene_aabb,
-                            # rendering options
-                            near_plane=near_plane,
-                            far_plane=far_plane,
-                            render_step_size=render_step_size,
-                            render_bkgd=render_bkgd,
-                            cone_angle=args.cone_angle,
-                            alpha_thre=alpha_thre,
-                            # test options
-                            test_chunk_size=args.test_chunk_size,
-                            timestamps=timestamps,
-                        )
-                        mse = F.mse_loss(rgb, pixels)
-                        psnr = -10.0 * torch.log(mse) / np.log(10.0)
-                        psnrs.append(psnr.item())
+                        os.makedirs(f'{image_root}/train', exist_ok=True)
+                        assert os.path.exists(f'{image_root}/train'), f"train images saving path dose not exits! path: {image_root}/train"
+                        train_dataset.training = False
+                        for i in tqdm(range(50)):
+                            data = train_dataset[i]
+                            render_bkgd = data["color_bkgd"].to(device)
+                            rays = namedtuple_map(lambda r: r.to(device), data["rays"])
+                            pixels = data["pixels"].to(device)
+                            timestamps = data["timestamps"].to(device)
 
-                        imageio.imwrite(
-                            f"{image_root}/train/acc_{i}.png",
-                            ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
-                        )
-                        imageio.imwrite(
-                            f"{image_root}/train/depth_{i}.png",
-                            (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
-                        )
-                        imageio.imwrite(
-                            f"{image_root}/train/rgb_{i}.png",
-                            (rgb.cpu().numpy() * 255).astype(np.uint8),
-                        )
-                        # break
-                    psnr_avg = sum(psnrs) / len(psnrs)
-                    print(f"evaluation: psnr_avg={psnr_avg}")
+                            # rendering
+                            rgb, _, depth, n_rendering_samples = render_image_test_v3(
+                                1024,
+                                radiance_field,
+                                occupancy_grid,
+                                rays,
+                                scene_aabb,
+                                # rendering options
+                                near_plane=near_plane,
+                                far_plane=far_plane,
+                                render_step_size=render_step_size,
+                                render_bkgd=render_bkgd,
+                                cone_angle=args.cone_angle,
+                                timestamps=timestamps,
+                            )
+                            mse = F.mse_loss(rgb, pixels)
+                            psnr = -10.0 * torch.log(mse) / np.log(10.0)
+                            psnrs.append(psnr.item())
+                            imageio.imwrite(
+                                f"{image_root}/train/depth_{i}.png",
+                                depth2img(depth),
+                            )
+                            imageio.imwrite(
+                                f"{image_root}/train/rgb_{i}.png",
+                                (rgb.cpu().numpy() * 255).astype(np.uint8),
+                            )
+                            # break
+                        psnr_avg = sum(psnrs) / len(psnrs)
+                        print(f"evaluation: psnr_avg={psnr_avg}")
 
-                    metrics_file = f"{image_root}/train/psnr.txt"
-                    psnr_str = [f'{p:.5f}\n' for p in psnrs] + [f'mean: {psnr_avg}']
-                    with open(metrics_file, 'w') as f:
-                        f.writelines(psnr_str)
+                        metrics_file = f"{image_root}/train/psnr.txt"
+                        psnr_str = [f'{p:.5f}\n' for p in psnrs] + [f'mean: {psnr_avg}']
+                        with open(metrics_file, 'w') as f:
+                            f.writelines(psnr_str)
 
                     print('save test image')
                     psnrs = []
-                    for i in tqdm.tqdm(range(len(test_dataset))):
-                        data = test_dataset[i]
-                        render_bkgd = data["color_bkgd"]
-                        rays = data["rays"]
-                        pixels = data["pixels"]
-                        timestamps = data["timestamps"]
 
+                    for i in tqdm(range(len(test_dataset))):
+                    # for data in test_dataloader:
+                        data = test_dataset[i]
+                        
+                        render_bkgd = data["color_bkgd"].to(device)
+                        # rays = data["rays"]
+                        rays = namedtuple_map(lambda r: r.to(device), data["rays"])
+                        pixels = data["pixels"].to(device)
+                        timestamps = data["timestamps"].to(device)
                         # rendering
-                        rgb, acc, depth, _, = render_image(
+                        rgb, _, depth, n_rendering_samples = render_image_test_v3(
+                            1024,
                             radiance_field,
                             occupancy_grid,
                             rays,
@@ -523,9 +666,6 @@ def main(args, gui=False):
                             render_step_size=render_step_size,
                             render_bkgd=render_bkgd,
                             cone_angle=args.cone_angle,
-                            alpha_thre=alpha_thre,
-                            # test options
-                            test_chunk_size=args.test_chunk_size,
                             timestamps=timestamps,
                         )
                         mse = F.mse_loss(rgb, pixels)
@@ -534,14 +674,9 @@ def main(args, gui=False):
 
                         os.makedirs(f'{image_root}', exist_ok=True)
                         assert os.path.exists(f'{image_root}'), f"test images saving path dose not exits! path: {image_root}"
-
-                        imageio.imwrite(
-                            f"{image_root}/acc_{i}.png",
-                            ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
-                        )
                         imageio.imwrite(
                             f"{image_root}/depth_{i}.png",
-                            (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
+                            depth2img(depth),
                         )
                         imageio.imwrite(
                             f"{image_root}/rgb_{i}.png",
@@ -555,50 +690,47 @@ def main(args, gui=False):
                     with open(metrics_file, 'w') as f:
                         f.writelines(psnr_str)
 
-                    print('save no move image')
+                    # print('save no move image')
 
-                    os.makedirs(f'{image_root}/no_move', exist_ok=True)
-                    assert os.path.exists(f'{image_root}/no_move'), f"test images saving path dose not exits! path: {image_root}/no_move"
+                    # os.makedirs(f'{image_root}/no_move', exist_ok=True)
+                    # assert os.path.exists(f'{image_root}/no_move'), f"test images saving path dose not exits! path: {image_root}/no_move"
 
-                    radiance_field.loose_move = True
+                    # radiance_field.loose_move = True
 
-                    for i in tqdm.tqdm(range(len(test_dataset))):
-                        data = test_dataset[i]
-                        render_bkgd = data["color_bkgd"]
-                        rays = data["rays"]
-                        pixels = data["pixels"]
-                        timestamps = data["timestamps"]
+                    # for i in tqdm(range(len(test_dataset))):
+                    # # for data in test_dataloader:
+                    #     data = test_dataset[i]
+                    #     render_bkgd = data["color_bkgd"].to(device)
+                    #     # rays = data["rays"]
+                    #     rays = namedtuple_map(lambda r: r.to(device), data["rays"])
+                    #     pixels = data["pixels"].to(device)
+                    #     timestamps = data["timestamps"].to(device)
 
-                        # rendering
-                        rgb, acc, depth, _, = render_image(
-                            radiance_field,
-                            occupancy_grid,
-                            rays,
-                            scene_aabb,
-                            # rendering options
-                            near_plane=near_plane,
-                            far_plane=far_plane,
-                            render_step_size=render_step_size,
-                            render_bkgd=render_bkgd,
-                            cone_angle=args.cone_angle,
-                            alpha_thre=alpha_thre,
-                            # test options
-                            test_chunk_size=args.test_chunk_size,
-                            timestamps=timestamps,
-                        )
-
-                        imageio.imwrite(
-                            f"{image_root}/no_move/acc_{i}.png",
-                            ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
-                        )
-                        imageio.imwrite(
-                            f"{image_root}/no_move/depth_{i}.png",
-                            (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
-                        )
-                        imageio.imwrite(
-                            f"{image_root}/no_move/rgb_{i}.png",
-                            (rgb.cpu().numpy() * 255).astype(np.uint8),
-                        )
+                    #     # rendering
+                    #     rgb, acc, depth, _, _ = render_image(
+                    #         radiance_field,
+                    #         occupancy_grid,
+                    #         rays,
+                    #         scene_aabb,
+                    #         # rendering options
+                    #         near_plane=near_plane,
+                    #         far_plane=far_plane,
+                    #         render_step_size=render_step_size,
+                    #         render_bkgd=render_bkgd,
+                    #         cone_angle=args.cone_angle,
+                    #         alpha_thre=alpha_thre,
+                    #         # test options
+                    #         test_chunk_size=args.test_chunk_size,
+                    #         timestamps=timestamps,
+                    #     )
+                    #     imageio.imwrite(
+                    #         f"{image_root}/no_move/depth_{i}.png",
+                    #         (lambda x: (x - x.min()) / (x.max() - x.min()) * 255)(depth.cpu().numpy()).astype(np.uint8),
+                    #     )
+                    #     imageio.imwrite(
+                    #         f"{image_root}/no_move/rgb_{i}.png",
+                    #         (rgb.cpu().numpy() * 255).astype(np.uint8),
+                    #     )
 
                 # psnr_avg = sum(psnrs) / len(psnrs)
                 # print(f"evaluation: psnr_avg={psnr_avg}")

@@ -17,10 +17,11 @@ import nerfacc.cuda as _C
 import torch.nn.functional as F
 from torch.cuda.amp import autocast
 
-from nerfacc import OccupancyGrid, ray_marching, rendering, pack_info, render_weight_from_density, render_weight_from_alpha, accumulate_along_rays
+from nerfacc import OccupancyGrid, ray_marching, rendering, pack_info, render_weight_from_density, render_weight_from_alpha, accumulate_along_rays, ContractionType
 
 from radiance_fields import trunc_exp
-
+from radiance_fields.ngp import NGPradianceField
+import math
 
 def get_opts():
     parser = argparse.ArgumentParser()
@@ -45,13 +46,32 @@ def get_opts():
             "mutant",
             "standup",
             "trex",
+            # 3d unbounded
+            "coffee_martini",
+            "cook_spinach", 
+            "cut_roasted_beef", 
+            "flame_salmon_1",
+            "flame_steak", 
+            "sear_steak",
+            # mipnerf360 unbounded
+            "garden",
+            "bicycle",
+            "bonsai",
+            "counter",
+            "kitchen",
+            "room",
+            "stump",
         ],
         help="which scene to use",
     )
     parser.add_argument(
         "--aabb",
         type=lambda s: [float(item) for item in s.split(",")],
-        default="-1.5,-1.5,-1.5,1.5,1.5,1.5",
+        # default="-1.5,-1.5,-1.5,1.5,1.5,1.5",
+        default="-1.0,-1.0,-1.0,1.0,1.0,1.0",
+        # default="-16.0,-16.0,-16.0,16.0,16.0,16.0",
+        # default="-64.0,-64.0,-64.0,64.0,64.0,64.0",
+        # default="-8.0,-8.0,-8.0,8.0,8.0,8.0",
         help="delimited list input",
     )
     parser.add_argument(
@@ -93,6 +113,7 @@ def get_opts():
         help="use a distortion loss",
     )
     parser.add_argument(
+        '-rl',
         "--rec_loss",
         type=str,
         default="huber",
@@ -128,18 +149,57 @@ def get_opts():
     )
 
     parser.add_argument(
+        '-te',
+        "--use_time_embedding",
+        action="store_true",
+        help="predict density with time embedding",
+    )
+
+    parser.add_argument(
+        '-ta',
+        "--use_time_attenuation",
+        action="store_true",
+        help="use time attenuation in time embedding",
+    )
+
+    parser.add_argument(
         '-ms',
         "--moving_step",
         type=float,
-        default=1024.,
+        default=4096.,
     )
+
+    parser.add_argument(
+        '-lv',
+        "--log_visdom",
+        action="store_true",
+        help="print to visdom",
+    )
+
+    parser.add_argument(
+        '-hl',
+        "--hash_level",
+        type=int,
+        default=0,
+        choices=[
+            0,
+            1,
+            2,
+        ],
+    )
+        
+
     parser.add_argument("--cone_angle", type=float, default=0.0)
     args = parser.parse_args()
 
     return args
 
 def get_feat_dir_and_loss(args):
-    feat_dir = 'pf' if args.use_feat_predict else 'nopf'
+
+    feat_dir = 'hl' + str(args.hash_level) + '_'
+
+    feat_dir += 'pf' if args.use_feat_predict else 'nopf'
+
     if args.use_weight_predict:
         feat_dir += '_pw'
     else:
@@ -159,12 +219,21 @@ def get_feat_dir_and_loss(args):
         feat_dir += "_distor"
 
     if args.use_dive_offsets:
-        feat_dir += "_dive"
+        feat_dir += "_dive" + str(args.moving_step)
+
+    if args.use_opacity_loss:
+        feat_dir += "_op"
+
+    if args.use_time_embedding:
+        feat_dir += "_te"
+        if args.use_time_attenuation:
+            feat_dir += "_ta"
+
+    
 
     return feat_dir, rec_loss_fn
 
 
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def reduce_along_rays(
     ray_indices: Tensor,
     values: Tensor,
@@ -215,7 +284,6 @@ def reduce_along_rays(
     outputs.scatter_reduce_(0, index, src, reduce="mean")
     return outputs
 
-@torch.cuda.amp.autocast(dtype=torch.float32)
 def accumulate_along_rays_no_weight(
     ray_indices: Tensor,
     values: Tensor,
@@ -543,3 +611,132 @@ def custom_render_image(
         extra,
         extra_info,
     )
+
+
+def get_ngp_args(args):
+
+    device = "cuda:0"
+
+    render_n_samples = 1024
+
+    # setup the dataset
+    train_dataset_kwargs = {}
+    test_dataset_kwargs = {}
+    if args.unbounded:
+        from datasets.nerf_360_v2 import SubjectLoader
+
+        data_root_fp = "/home/loyot/workspace/Datasets/NeRF/360_v2/"
+        target_sample_batch_size = 1 << 20
+        train_dataset_kwargs = {"color_bkgd_aug": "random", "factor": 4}
+        test_dataset_kwargs = {"factor": 4}
+        grid_resolution = 256
+    else:
+        from datasets.nerf_360_v2 import SubjectLoader
+
+        # data_root_fp = "/home/loyot/workspace/Datasets/NeRF/nerf_synthetic/"
+        data_root_fp = "/home/loyot/workspace/Datasets/NeRF/360_v2/"
+        target_sample_batch_size = 1 << 18
+        grid_resolution = 128
+
+        train_dataset_kwargs = {"color_bkgd_aug": "random", "factor": 4}
+        test_dataset_kwargs = {"factor": 4}
+        grid_resolution = 128
+
+    train_dataset = SubjectLoader(
+        subject_id=args.scene,
+        root_fp=data_root_fp,
+        split=args.train_split,
+        num_rays=target_sample_batch_size // render_n_samples,
+        **train_dataset_kwargs,
+    )
+
+    # train_dataset.images = train_dataset.images.to(device)
+    train_dataset.camtoworlds = train_dataset.camtoworlds.to(device)
+    train_dataset.K = train_dataset.K.to(device)
+
+    test_dataset = SubjectLoader(
+        subject_id=args.scene,
+        root_fp=data_root_fp,
+        split="test",
+        num_rays=None,
+        **test_dataset_kwargs,
+    )
+    # test_dataset.images = test_dataset.images.to(device)
+    test_dataset.camtoworlds = test_dataset.camtoworlds.to(device)
+    test_dataset.K = test_dataset.K.to(device)
+
+    if args.auto_aabb:
+        camera_locs = torch.cat(
+            [train_dataset.camtoworlds, test_dataset.camtoworlds]
+        )[:, :3, -1]
+        args.aabb = torch.cat(
+            [camera_locs.min(dim=0).values, camera_locs.max(dim=0).values]
+        ).tolist()
+        print("Using auto aabb", args.aabb)
+
+    # setup the scene bounding box.
+    if args.unbounded:
+        print("Using unbounded rendering")
+        contraction_type = ContractionType.UN_BOUNDED_SPHERE
+        # contraction_type = ContractionType.UN_BOUNDED_TANH
+        scene_aabb = None
+        near_plane = 0.2
+        far_plane = 1e2
+        render_step_size = 1e-2
+        alpha_thre = 1e-2
+        # alpha_thre = 0
+    else:
+        contraction_type = ContractionType.AABB
+        scene_aabb = torch.tensor(args.aabb, dtype=torch.float16, device=device)
+        near_plane = None
+        far_plane = None
+        render_step_size = (
+            (scene_aabb[3:] - scene_aabb[:3]).max()
+            * math.sqrt(3)
+            / render_n_samples
+        ).item()
+        alpha_thre = 0.0
+        near_plane = 0.2
+        # far_plane = 1e2
+        render_step_size = 1e-2
+        alpha_thre = 1e-2
+
+    radiance_field = NGPradianceField(
+        aabb=args.aabb,
+        unbounded=args.unbounded,
+    ).to(device)
+
+    occupancy_grid = OccupancyGrid(
+        roi_aabb=args.aabb,
+        resolution=grid_resolution,
+        contraction_type=contraction_type,
+    ).to(device)
+
+    root = '/home/loyot/workspace/code/training_results/nerfacc/checkpoints'
+    model_path = root + f'/ngp_nerf_{args.scene}_20000.pth'
+    # state_dict = torch.load(args.pretrained_model_path)
+
+    state_dict = torch.load(model_path)
+    radiance_field.load_state_dict(state_dict["radiance_field"])
+    occupancy_grid.load_state_dict(state_dict["occupancy_grid"])
+
+
+    gui_args = {
+        'train_dataset': train_dataset, 
+        'test_dataset': test_dataset, 
+        'radiance_field': radiance_field, 
+        'occupancy_grid': occupancy_grid,
+        'contraction_type': contraction_type,
+        'scene_aabb': scene_aabb,
+        'near_plane': near_plane,
+        'far_plane': far_plane,
+        'alpha_thre': alpha_thre,
+        'cone_angle': args.cone_angle,
+        'test_chunk_size': args.test_chunk_size,
+        'render_bkgd': torch.ones(3, device=device),
+        'render_n_samples': render_n_samples,
+        'render_step_size': render_step_size,
+        'args_aabb': np.array(args.aabb),
+    }
+
+    return gui_args
