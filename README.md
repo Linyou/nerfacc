@@ -32,9 +32,33 @@ Using NerfAcc,
 
 ## Installation
 
+**Dependence**: Please install [Pytorch](https://pytorch.org/get-started/locally/) first.
+
+The easist way is to install from PyPI. In this way it will build the CUDA code **on the first run** (JIT).
 ```
 pip install nerfacc
 ```
+
+Or install from source. In this way it will build the CUDA code during installation.
+```
+pip install git+https://github.com/KAIR-BAIR/nerfacc.git
+```
+
+We also provide pre-built wheels covering major combinations of Pytorch + CUDA supported by [official Pytorch](https://pytorch.org/get-started/previous-versions/).
+
+```
+# e.g., torch 1.13.0 + cu117
+pip install nerfacc -f https://nerfacc-bucket.s3.us-west-2.amazonaws.com/whl/torch-1.13.0_cu117.html
+```
+
+| Windows & Linux | `cu102` | `cu113` | `cu116` | `cu117` |
+|-----------------|---------|---------|---------|---------|
+| torch 1.10.0    | ✅      | ✅      |         |         |
+| torch 1.11.0    | ✅*     | ✅      |         |         |
+| torch 1.12.0    | ✅*     | ✅      | ✅      |         |
+| torch 1.13.0    |         |         | ✅      | ✅      |
+
+\* Pytorch does not support Windows pre-built wheels for those combinations thus we do not support as well.
 
 ## Usage
 
@@ -136,13 +160,21 @@ python examples/train_mlp_dnerf.py --train_split train --scene lego
 ```bash
 # Instant-NGP on unbounded scenes in 20 minutes!
 # See results at here: https://www.nerfacc.com/en/latest/examples/unbounded.html
-python examples/train_ngp_nerf.py --train_split train --scene garden --auto_aabb --unbounded --cone_angle=0.004
+python examples/train_ngp_nerf.py --train_split train --scene garden --unbounded --cone_angle=0.004 --aabb="-1.,-1.,-1.,1.,1.,1."
 ```
 
 Used by:
 - [nerfstudio](https://github.com/nerfstudio-project/nerfstudio): A collaboration friendly studio for NeRFs.
 - [instant-nsr-pl](https://github.com/bennyguo/instant-nsr-pl): NeuS in 10 minutes.
 
+
+## Common Installation Issues
+
+
+<details>
+    <summary>ImportError: .../csrc.so: undefined symbol</summary>
+    If you are installing a pre-built wheel, make sure the Pytorch and CUDA version matchs with the nerfacc version (nerfacc.__version__).
+</details>
 
 ## Citation
 

@@ -258,7 +258,7 @@ def ray_marching(
             device=rays_o.device,
         )
         grid_binary = torch.ones(
-            [1, 1, 1], dtype=torch.bool, device=rays_o.device
+            [1, 1, 1, 1], dtype=torch.bool, device=rays_o.device
         )
         contraction_type = ContractionType.AABB.to_cpp_version()
 
@@ -596,8 +596,9 @@ def ray_marching_test_v2(
         masks = render_visibility(
             alphas,
             ray_indices=ray_indices,
+            packed_info=packed_info,
             early_stop_eps=early_stop_eps,
-            alpha_thre=alpha_thre,
+            alpha_thre=min(alpha_thre, grid.occs.mean().item()),
             n_rays=rays_o.shape[0],
         )
         ray_indices, t_starts, t_ends = (

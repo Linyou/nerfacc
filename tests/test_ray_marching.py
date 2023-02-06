@@ -48,6 +48,30 @@ def test_marching_with_grid():
     return
 
 
+@pytest.mark.skipif(not torch.cuda.is_available, reason="No CUDA device")
+def test_marching_with_mip_grid():
+    rays_o = torch.tensor([[0.0, 0.0, 0.0]], device=device)
+    rays_d = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+    rays_d = rays_d / rays_d.norm(dim=-1, keepdim=True)
+    grid = OccupancyGrid(
+        roi_aabb=[-1, -1, -1, 1, 1, 1], resolution=2, levels=2
+    ).to(device)
+    grid._binary[:] = True
+
+    ray_indices, t_starts, t_ends = ray_marching(
+        rays_o,
+        rays_d,
+        grid=grid,
+        near_plane=0.0,
+        far_plane=2.0 * 2.0,
+        render_step_size=1e-1,
+    )
+    samples = (
+        rays_o[ray_indices] + rays_d[ray_indices] * (t_starts + t_ends) / 2.0
+    )
+
+
 if __name__ == "__main__":
     test_marching_with_near_far()
     test_marching_with_grid()
+    test_marching_with_mip_grid()

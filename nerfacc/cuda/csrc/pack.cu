@@ -9,7 +9,7 @@ __global__ void unpack_info_kernel(
     const int n_rays,
     const int *packed_info,
     // output
-    long *ray_indices)
+    int64_t *ray_indices)
 {
     CUDA_GET_THREAD_ID(i, n_rays);
 
@@ -97,7 +97,7 @@ torch::Tensor unpack_info(const torch::Tensor packed_info, const int n_samples)
     unpack_info_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
         n_rays,
         packed_info.data_ptr<int>(),
-        ray_indices.data_ptr<long>());
+        ray_indices.data_ptr<int64_t>());
     return ray_indices;
 }
 
@@ -126,7 +126,8 @@ torch::Tensor unpack_info_to_mask(
 torch::Tensor unpack_data(
     torch::Tensor packed_info,
     torch::Tensor data,
-    int n_samples_per_ray)
+    int n_samples_per_ray,
+    float pad_value)
 {
     DEVICE_GUARD(packed_info);
 
@@ -143,8 +144,8 @@ torch::Tensor unpack_data(
     const int threads = 256;
     const int blocks = CUDA_N_BLOCKS_NEEDED(n_rays, threads);
 
-    torch::Tensor unpacked_data = torch::zeros(
-        {n_rays, n_samples_per_ray, data_dim}, data.options());
+    torch::Tensor unpacked_data = torch::full(
+        {n_rays, n_samples_per_ray, data_dim}, pad_value, data.options());
 
     AT_DISPATCH_ALL_TYPES(
         data.scalar_type(),

@@ -89,11 +89,21 @@ std::vector<torch::Tensor> ray_resampling(
     torch::Tensor weights,
     const int steps);
 
+torch::Tensor ray_pdf_query(
+    torch::Tensor packed_info,
+    torch::Tensor starts,
+    torch::Tensor ends,
+    torch::Tensor pdfs,
+    torch::Tensor resample_packed_info,
+    torch::Tensor resample_starts,
+    torch::Tensor resample_ends);
+
 torch::Tensor unpack_data(
     torch::Tensor packed_info,
     torch::Tensor data,
-    int n_samples_per_ray);
-
+    int n_samples_per_ray,
+    float pad_value);
+    
 // cub implementations: parallel across samples
 bool is_cub_available() {
     return (bool) CUB_SUPPORTS_SCAN_BY_KEY();
@@ -159,6 +169,15 @@ torch::Tensor weight_from_alpha_backward_naive(
     torch::Tensor packed_info,
     torch::Tensor alphas);
 
+std::vector<torch::Tensor> invert_cdf(
+    torch::Tensor src_bins,
+    torch::Tensor s0,
+    torch::Tensor s1,
+    torch::Tensor w,
+    torch::Tensor tgt_bins,
+    torch::Tensor cdf_u0,
+    torch::Tensor cdf_u1);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     // contraction
@@ -178,6 +197,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("ray_marching_test", &ray_marching_test);
     m.def("ray_marching_test_v2", &ray_marching_test_v2);
     m.def("ray_resampling", &ray_resampling);
+    m.def("ray_pdf_query", &ray_pdf_query);
+    
+    // cdf
+    m.def("invert_cdf", &invert_cdf);
 
     // rendering
     m.def("is_cub_available", is_cub_available);
