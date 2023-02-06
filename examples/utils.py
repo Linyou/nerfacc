@@ -11,9 +11,9 @@ import torch
 from datasets.utils import Rays, namedtuple_map
 
 from nerfacc import (
-    OccupancyGrid, ray_marching, ray_marching_test, 
+    OccupancyGrid, ray_marching, 
     rendering, pack_info, ray_aabb_intersect,
-    rendering_test, ray_marching_test_v2, rendering_test_v2,
+    rendering_test, rendering_test_v2,
     ray_marching_test_v3
 )
 

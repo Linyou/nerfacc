@@ -9,7 +9,7 @@ from .grid import Grid, OccupancyGrid, query_grid
 from .intersection import ray_aabb_intersect
 from .losses import distortion as loss_distortion
 from .pack import pack_data, pack_info, unpack_data, unpack_info
-from .ray_marching import ray_marching, ray_marching_test, ray_marching_test_v2, ray_marching_test_v3
+from .ray_marching import ray_marching, ray_marching_test_v3
 from .version import __version__
 from .vol_rendering import (
     accumulate_along_rays,
@@ -46,7 +46,6 @@ __all__ = [
     "contract_inv",
     "ray_aabb_intersect",
     "ray_marching",
-    "ray_marching_test",
     "accumulate_along_rays",
     "render_visibility",
     "render_visibility_prefix",
@@ -55,7 +54,6 @@ __all__ = [
     "rendering",
     "rendering_test",
     "rendering_test_v2",
-    "ray_marching_test_v2",
     "ray_marching_test_v3",
     "pack_data",
     "unpack_data",

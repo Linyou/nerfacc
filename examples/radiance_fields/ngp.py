@@ -92,9 +92,12 @@ class NGPradianceField(torch.nn.Module):
         self.density_activation = density_activation
         self.unbounded = unbounded
 
+        self.box_scale = (aabb[3:] - aabb[:3]).max() / 2
+        print("self.box_scale: ", self.box_scale)
+
         self.geo_feat_dim = geo_feat_dim
         per_level_scale = math.exp(
-            math.log(4096 * 1 / base_resolution) / (n_levels - 1)
+            math.log(2048 * self.box_scale / base_resolution) / (n_levels - 1)
         )  # 1.4472692012786865
 
         if self.use_viewdirs:
