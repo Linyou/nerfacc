@@ -99,6 +99,7 @@ class NGPradianceField(torch.nn.Module):
         per_level_scale = math.exp(
             math.log(2048 * self.box_scale / base_resolution) / (n_levels - 1)
         )  # 1.4472692012786865
+        per_level_scale = 1.4472692012786865
 
         if self.use_viewdirs:
             self.direction_encoding = tcnn.Encoding(

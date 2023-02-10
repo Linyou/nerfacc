@@ -501,12 +501,12 @@ std::vector<torch::Tensor> ray_marching_test(
     TORCH_CHECK(t_min.ndimension() == 1)
     TORCH_CHECK(t_max.ndimension() == 1)
     TORCH_CHECK(roi.ndimension() == 1 & roi.size(0) == 6)
-    TORCH_CHECK(grid_binary.ndimension() == 3)
+    TORCH_CHECK(grid_binary.ndimension() == 4)
 
     // const int n_rays = n_rays.size(0);
     const int grid_nlvl = grid_binary.size(0);
     const int3 grid_res = make_int3(
-        grid_binary.size(0), grid_binary.size(1), grid_binary.size(2));
+        grid_binary.size(1), grid_binary.size(2), grid_binary.size(3));
 
     const int threads = 256;
     const int blocks = CUDA_N_BLOCKS_NEEDED(n_rays, threads);

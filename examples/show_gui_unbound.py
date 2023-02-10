@@ -5,10 +5,11 @@ from scipy.spatial.transform import Rotation as R
 import time
 import cv2
 
-from custom_utils import get_opts, get_feat_dir_and_loss, get_ngp_args
+from custom_utils import get_opts, get_feat_dir_and_loss, get_ngp_args, get_ngp_multires_args
 
 import math
 import time
+import argparse
 
 import numpy as np
 import torch
@@ -168,7 +169,7 @@ class NGPGUI:
         self.alpha_thre = render_kwargs['alpha_thre']
 
         self.cone_angle = render_kwargs['cone_angle']
-        self.test_chunk_size = render_kwargs['test_chunk_size']
+        # self.test_chunk_size = render_kwargs['test_chunk_size']
         self.render_bkgd = render_kwargs['render_bkgd']
         self.args_aabb = render_kwargs['args_aabb']
 
@@ -269,6 +270,7 @@ class NGPGUI:
                 render_step_size=self.render_step_size,
                 render_bkgd=self.render_bkgd,
                 cone_angle=self.cone_angle,
+                alpha_thre=self.alpha_thre,
                 # test options
                 # test_chunk_size=self.test_chunk_size,
                 # timestamps=self.timestamps,
@@ -465,6 +467,31 @@ def render_gui(ngp=None, args=None):
 
 if __name__ == "__main__":
     hparams = get_opts()
+
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument(
+    #     "--scene",
+    #     type=str,
+    #     default="garden",
+    #     choices=[
+    #         "garden",
+    #         "bicycle",
+    #         "bonsai",
+    #         "counter",
+    #         "kitchen",
+    #         "room",
+    #         "stump",
+    #     ],
+    #     help="which scene to use",
+    # )
+    # parser.add_argument(
+    #     '-d',
+    #     "--distortion_loss",
+    #     action="store_true",
+    #     help="use a distortion loss",
+    # )
+    # parser.add_argument("--cone_angle", type=float, default=0.0039)
+    # hparams = parser.parse_args()
 
     args = get_ngp_args(hparams)
     ngp = NGPGUI(render_kwargs=args)

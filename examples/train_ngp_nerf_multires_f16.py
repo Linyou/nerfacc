@@ -11,19 +11,34 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import tqdm
+from torch import Tensor
 from datasets.nerf_360_v2 import SubjectLoader
 from radiance_fields.ngp import NGPradianceField
-from utils import render_image, set_random_seed
+from utils import render_image, set_random_seed, render_image_test_v3
 
 from nerfacc import OccupancyGrid
 
 import apex
+
+import taichi as ti
+ti.init(arch=ti.cuda, offline_cache=True)
 
 def enlarge_aabb(aabb, factor: float) -> torch.Tensor:
     center = (aabb[:3] + aabb[3:]) / 2
     extent = (aabb[3:] - aabb[:3]) / 2
     return torch.cat([center - extent * factor, center + extent * factor])
 
+from torch_efficient_distloss import flatten_eff_distloss, eff_distloss
+
+
+def distortion(
+    ray_ids: Tensor, weights: Tensor, t_starts: Tensor, t_ends: Tensor
+) -> Tensor:
+
+    interval = t_ends - t_starts
+    tmid = (t_starts + t_ends) / 2
+
+    return flatten_eff_distloss(weights.squeeze(-1), tmid.squeeze(-1), interval.squeeze(-1), ray_ids)
 
 # arguments
 parser = argparse.ArgumentParser()
@@ -41,6 +56,18 @@ parser.add_argument(
         "stump",
     ],
     help="which scene to use",
+)
+parser.add_argument(
+    '-d',
+    "--distortion_loss",
+    action="store_true",
+    help="use a distortion loss",
+)
+parser.add_argument(
+    '-o',
+    "--use_opacity_loss",
+    action="store_true",
+    help="use a opacity loss",
 )
 parser.add_argument("--cone_angle", type=float, default=0.0039)
 args = parser.parse_args()
@@ -108,50 +135,50 @@ occupancy_grid = OccupancyGrid(
 ).to(device)
 
 # setup visualizer to inspect camera and aabb
-vis = nerfvis.Scene("nerf")
+# vis = nerfvis.Scene("nerf")
 
-vis.add_camera_frustum(
-    "train_camera",
-    focal_length=train_dataset.K[0, 0].item(),
-    image_width=train_dataset.images.shape[2],
-    image_height=train_dataset.images.shape[1],
-    z=0.3,
-    r=train_dataset.camtoworlds[:, :3, :3],
-    t=train_dataset.camtoworlds[:, :3, -1],
-)
+# vis.add_camera_frustum(
+#     "train_camera",
+#     focal_length=train_dataset.K[0, 0].item(),
+#     image_width=train_dataset.images.shape[2],
+#     image_height=train_dataset.images.shape[1],
+#     z=0.3,
+#     r=train_dataset.camtoworlds[:, :3, :3],
+#     t=train_dataset.camtoworlds[:, :3, -1],
+# )
 
-p1 = aabb[:3].cpu().numpy()
-p2 = aabb[3:].cpu().numpy()
-verts, segs = [
-    [p1[0], p1[1], p1[2]],
-    [p1[0], p1[1], p2[2]],
-    [p1[0], p2[1], p2[2]],
-    [p1[0], p2[1], p1[2]],
-    [p2[0], p1[1], p1[2]],
-    [p2[0], p1[1], p2[2]],
-    [p2[0], p2[1], p2[2]],
-    [p2[0], p2[1], p1[2]],
-], [
-    [0, 1],
-    [1, 2],
-    [2, 3],
-    [3, 0],
-    [4, 5],
-    [5, 6],
-    [6, 7],
-    [7, 4],
-    [0, 4],
-    [1, 5],
-    [2, 6],
-    [3, 7],
-]
-vis.add_lines(
-    "aabb",
-    np.array(verts).astype(dtype=np.float32),
-    segs=np.array(segs),
-)
+# p1 = aabb[:3].cpu().numpy()
+# p2 = aabb[3:].cpu().numpy()
+# verts, segs = [
+#     [p1[0], p1[1], p1[2]],
+#     [p1[0], p1[1], p2[2]],
+#     [p1[0], p2[1], p2[2]],
+#     [p1[0], p2[1], p1[2]],
+#     [p2[0], p1[1], p1[2]],
+#     [p2[0], p1[1], p2[2]],
+#     [p2[0], p2[1], p2[2]],
+#     [p2[0], p2[1], p1[2]],
+# ], [
+#     [0, 1],
+#     [1, 2],
+#     [2, 3],
+#     [3, 0],
+#     [4, 5],
+#     [5, 6],
+#     [6, 7],
+#     [7, 4],
+#     [0, 4],
+#     [1, 5],
+#     [2, 6],
+#     [3, 7],
+# ]
+# vis.add_lines(
+#     "aabb",
+#     np.array(verts).astype(dtype=np.float32),
+#     segs=np.array(segs),
+# )
 
-vis.display(port=8889, serve_nonblocking=True)
+# vis.display(port=8889, serve_nonblocking=True)
 
 
 # training
@@ -203,6 +230,16 @@ for step in range(max_steps + 1):
         # loss = F.huber_loss(rgb, pixels)
         loss = F.mse_loss(rgb, pixels)
 
+        if args.distortion_loss:
+            loss_distor = 0.
+            for (weight, t_starts, t_ends, ray_indices) in extra_info:
+                loss_distor += distortion(ray_indices, weight, t_starts, t_ends) * 1e-4
+            loss += loss_distor
+
+        if args.use_opacity_loss:
+            loss_o = (-acc*torch.log(acc)).mean()*1e-4
+            loss += loss_o
+
     optimizer.zero_grad()
     # (loss * 1024).backward()
     grad_scaler.scale(loss).backward()
@@ -219,9 +256,14 @@ for step in range(max_steps + 1):
 
         elapsed_time = time.time() - tic
         loss = F.mse_loss(rgb, pixels)
+        loss_log = f"loss={loss:.5f} | "
+        if args.use_opacity_loss:
+            loss_log += f"opac={loss_o:.7f} | "
+        if args.distortion_loss:
+            loss_log += f"dist={loss_distor:.7f} | "
         prog = (
             f"e_time={elapsed_time:.2f}s | step={step} | "
-            f"loss={loss:.5f} | " 
+            f'{loss_log}'
             f"n_s={n_rendering_samples:d} | num_rays={len(pixels):d} | "
             f"s/ray={n_rendering_samples/len(pixels):.2f}"
         )
@@ -257,7 +299,8 @@ for step in range(max_steps + 1):
                 pixels = data["pixels"]
 
                 # rendering
-                rgb, acc, depth, _, _ = render_image(
+                rgb, acc, depth, _ = render_image_test_v3(
+                    1024,
                     radiance_field,
                     occupancy_grid,
                     rays,
@@ -269,7 +312,7 @@ for step in range(max_steps + 1):
                     cone_angle=args.cone_angle,
                     alpha_thre=alpha_thre,
                     # test options
-                    test_chunk_size=8192,
+                    # test_chunk_size=16384,
                 )
                 mse = F.mse_loss(rgb, pixels)
                 psnr = -10.0 * torch.log(mse) / np.log(10.0)
@@ -277,28 +320,28 @@ for step in range(max_steps + 1):
 
                 # if step != max_steps:
 
-            def nerfvis_eval_fn(x, dirs):
-                density, embedding = radiance_field.query_density(
-                    x, return_feat=True
-                )
-                embedding = embedding.expand(-1, dirs.shape[1], -1)
-                dirs = dirs.expand(embedding.shape[0], -1, -1)
-                rgb = radiance_field._query_rgb(
-                    dirs, embedding=embedding, apply_act=False
-                )
-                return rgb, density
+            # def nerfvis_eval_fn(x, dirs):
+            #     density, embedding = radiance_field.query_density(
+            #         x, return_feat=True
+            #     )
+            #     embedding = embedding.expand(-1, dirs.shape[1], -1)
+            #     dirs = dirs.expand(embedding.shape[0], -1, -1)
+            #     rgb = radiance_field._query_rgb(
+            #         dirs, embedding=embedding, apply_act=False
+            #     )
+            #     return rgb, density
 
-            vis.remove("nerf")
-            vis.add_nerf(
-                name="nerf",
-                eval_fn=nerfvis_eval_fn,
-                center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
-                radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
-                use_dirs=True,
-                reso=128,
-                sigma_thresh=1.0,
-            )
-            vis.display(port=8889, serve_nonblocking=True)
+            # vis.remove("nerf")
+            # vis.add_nerf(
+            #     name="nerf",
+            #     eval_fn=nerfvis_eval_fn,
+            #     center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
+            #     radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
+            #     use_dirs=True,
+            #     reso=128,
+            #     sigma_thresh=1.0,
+            # )
+            # vis.display(port=8889, serve_nonblocking=True)
 
             imageio.imwrite(
                 "rgb_test.png",
@@ -315,13 +358,13 @@ for step in range(max_steps + 1):
         psnr_avg = sum(psnrs) / len(psnrs)
         print(f"evaluation: psnr_avg={psnr_avg}")
 
-        # torch.save(
-        #     {
-        #         "radiance_field": radiance_field.state_dict(),
-        #         "occupancy_grid": occupancy_grid.state_dict(),
-        #         "optimizer": optimizer.state_dict(),
-        #         "scheduler": scheduler.state_dict(),
-        #         "step": step,
-        #     },
-        #     "ckpt.pt"
-        # )
+        torch.save(
+            {
+                "radiance_field": radiance_field.state_dict(),
+                "occupancy_grid": occupancy_grid.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "step": step,
+            },
+            "multires.pth"
+        )

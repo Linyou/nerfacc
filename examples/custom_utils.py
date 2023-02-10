@@ -123,12 +123,7 @@ def get_opts():
             "smooth_l1",
         ],
     )
-    parser.add_argument(
-        '-o',
-        "--use_opacity_loss",
-        action="store_true",
-        help="use a opacity loss",
-    )
+
     parser.add_argument(
         "--pretrained_model_path",
         default="",
@@ -737,6 +732,85 @@ def get_ngp_args(args):
         'render_n_samples': render_n_samples,
         'render_step_size': render_step_size,
         'args_aabb': np.array(args.aabb),
+    }
+
+    return gui_args
+
+
+def get_ngp_multires_args(args):
+
+    device = "cuda:0"
+
+    device = "cuda:0"
+    target_sample_batch_size = 1 << 18  # train with 1M samples per batch
+    grid_resolution = 128  # resolution of the occupancy grid
+    grid_nlvl = 4  # number of levels of the occupancy grid
+    render_step_size = 1e-3  # render step size
+    alpha_thre = 1e-2  # skipping threshold on alpha
+    max_steps = 20000  # training steps
+    aabb_scale = 1 << (grid_nlvl - 1)  # scale up the the aabb as pesudo unbounded
+    near_plane = 0.02
+
+    from datasets.nerf_360_v2 import SubjectLoader
+
+    # setup the dataset
+    data_root_fp = "/home/loyot/workspace/Datasets/NeRF/360_v2/"
+    train_dataset = SubjectLoader(
+        subject_id=args.scene,
+        root_fp=data_root_fp,
+        split="train",
+        num_rays=16384,  # initial number of rays
+        color_bkgd_aug="random",
+        factor=4,
+        device=device,
+    )
+    test_dataset = SubjectLoader(
+        subject_id=args.scene,
+        root_fp=data_root_fp,
+        split="test",
+        num_rays=None,
+        factor=4,
+        device=device,
+    )
+
+
+    def enlarge_aabb(aabb, factor: float) -> torch.Tensor:
+        center = (aabb[:3] + aabb[3:]) / 2
+        extent = (aabb[3:] - aabb[:3]) / 2
+        return torch.cat([center - extent * factor, center + extent * factor])
+
+    # The region of interest of the scene has been normalized to [-1, 1]^3.
+    aabb = torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device=device)
+    aabb_bkgd = enlarge_aabb(aabb, aabb_scale)
+
+
+    radiance_field = NGPradianceField(aabb=aabb_bkgd).to(device)
+    occupancy_grid = OccupancyGrid(
+        roi_aabb=aabb, resolution=grid_resolution, levels=grid_nlvl
+    ).to(device)
+
+    # root = '/home/loyot/workspace/code/training_results/nerfacc/checkpoints'
+    # model_path = root + f'/ngp_nerf_{args.scene}_20000.pth'
+    # state_dict = torch.load(args.pretrained_model_path)
+
+    state_dict = torch.load('multires.pth')
+    radiance_field.load_state_dict(state_dict["radiance_field"])
+    occupancy_grid.load_state_dict(state_dict["occupancy_grid"])
+
+
+    gui_args = {
+        'train_dataset': train_dataset, 
+        'test_dataset': test_dataset, 
+        'radiance_field': radiance_field, 
+        'occupancy_grid': occupancy_grid,
+        'scene_aabb': aabb_bkgd,
+        'near_plane': near_plane,
+        'alpha_thre': alpha_thre,
+        'cone_angle': args.cone_angle,
+        # 'test_chunk_size': args.test_chunk_size,
+        'render_bkgd': torch.ones(3, device=device),
+        'render_step_size': render_step_size,
+        # 'args_aabb': np.array(args.aabb),
     }
 
     return gui_args
