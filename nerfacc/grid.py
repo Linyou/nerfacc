@@ -243,16 +243,105 @@ class OccupancyGrid(Grid):
             occ = occ_eval_fn(x).squeeze(-1)
             # ema update
             cell_ids = lvl * self.num_cells_per_lvl + indices
-            self.occs[cell_ids] = torch.maximum(
-                self.occs[cell_ids] * ema_decay, occ
-            )
+            # self.occs[cell_ids] = torch.maximum(
+            #     self.occs[cell_ids] * ema_decay, occ
+            # )
+            self.occs[cell_ids] = \
+                torch.where(self.occs[cell_ids]<0,
+                            self.occs[cell_ids],
+                            torch.maximum(self.occs[cell_ids]*ema_decay, occ))
             # suppose to use scatter max but emperically it is almost the same.
             # self.occs, _ = scatter_max(
             #     occ, indices, dim=0, out=self.occs * ema_decay
             # )
         self._binary = (
-            self.occs > torch.clamp(self.occs.mean(), max=occ_thre)
+            self.occs > torch.clamp(self.occs[self.occs>0].mean(), max=occ_thre)
         ).view(self._binary.shape)
+
+    @torch.no_grad()
+    def get_non_visiable(
+        self,
+    ):
+        """Update the occ field in the EMA way."""
+        # sample cells
+
+        lvl_indices = self._get_all_cells()
+        list_x = []
+
+        for lvl, indices in enumerate(lvl_indices):
+            # infer occupancy: density * step_size
+            grid_coords = self.grid_coords[indices]
+            x = (
+                grid_coords + torch.rand_like(grid_coords, dtype=torch.float32)
+            ) / self.resolution
+            if self._contraction_type == ContractionType.UN_BOUNDED_SPHERE:
+                # only the points inside the sphere are valid
+                mask = (x - 0.5).norm(dim=1) < 0.5
+                x = x[mask]
+                indices = indices[mask]
+            # voxel coordinates [0, 1]^3 -> world
+            x = contract_inv(
+                (x - 0.5) * (2**lvl) + 0.5,
+                roi=self._roi_aabb,
+                type=self._contraction_type,
+            )
+            cell_ids = lvl * self.num_cells_per_lvl + indices
+            mask = self.occs[cell_ids] < 0
+            list_x.append(x[mask])
+
+        return list_x
+
+    @torch.no_grad()
+    def mark_invisible_cells(self, K, poses, img_wh, near_plane, chunk=32**3):
+        """
+        mark the cells that aren't covered by the cameras with density -1
+        only executed once before training starts
+
+        Inputs:
+            K: (3, 3) camera intrinsics
+            poses: (N, 3, 4) camera to world poses
+            img_wh: image width and height
+            chunk: the chunk size to split the cells (to avoid OOM)
+        """
+        from einops import rearrange
+        N_cams = poses.shape[0]
+        w2c_R = rearrange(poses[:, :3, :3], 'n a b -> n b a') # (N_cams, 3, 3)
+        w2c_T = -w2c_R@poses[:, :3, 3:] # (N_cams, 3, 1)
+        cells = self._get_all_cells()
+        print("grid before mask: ", self.occs[self.occs>=0].shape)
+        for lvl in range(self.levels):
+            indices = cells[lvl]
+            coords = self.grid_coords[indices]
+            for i in range(0, len(indices), chunk):
+                x = coords[i:i+chunk]/(self.resolution-1)
+                if self._contraction_type == ContractionType.UN_BOUNDED_SPHERE:
+                    # only the points inside the sphere are valid
+                    mask = (x - 0.5).norm(dim=1) < 0.5
+                    x = x[mask]
+                    indices = indices[mask]
+                # voxel coordinates [0, 1]^3 -> world
+                xyzs_w = contract_inv(
+                    (x - 0.5) * (2**lvl) + 0.5,
+                    roi=self._roi_aabb,
+                    type=self._contraction_type,
+                ).T
+                xyzs_c = w2c_R @ xyzs_w + w2c_T # (N_cams, 3, chunk)
+                uvd = K @ xyzs_c # (N_cams, 3, chunk)
+                uv = uvd[:, :2]/uvd[:, 2:] # (N_cams, 2, chunk)
+                in_image = (uvd[:, 2]>=0)& \
+                           (uv[:, 0]>=0)&(uv[:, 0]<img_wh[0])& \
+                           (uv[:, 1]>=0)&(uv[:, 1]<img_wh[1])
+                covered_by_cam = (uvd[:, 2]>=near_plane)&in_image # (N_cams, chunk)
+                # if the cell is visible by at least one camera
+                count = covered_by_cam.sum(0)/N_cams
+
+                valid_mask = (count>0)
+                cell_ids_base = lvl * self.num_cells_per_lvl 
+                self.occs[cell_ids_base+indices[i:i+chunk]] = \
+                    torch.where(valid_mask, 0., -1.)
+
+        print("grid after mask: ", self.occs[self.occs>=0].shape)
+
 
     @torch.no_grad()
     def every_n_step(
