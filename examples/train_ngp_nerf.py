@@ -177,7 +177,7 @@ if __name__ == "__main__":
     # train_dataset.camtoworlds = train_dataset.camtoworlds.to(device)
     # train_dataset.K = train_dataset.K.to(device)
 
-    train_dataset.update_num_rays(16384)
+    train_dataset.update_num_rays(8192)
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -197,8 +197,8 @@ if __name__ == "__main__":
         near_plane = 0.02
         far_plane = 100
         render_step_size = 1e-3
-        alpha_thre = 1e-2
-        # alpha_thre = 0.0
+        # alpha_thre = 1e-2
+        alpha_thre = 0.0
     else:
         contraction_type = ContractionType.AABB
         scene_aabb = torch.tensor(args.aabb, dtype=torch.float32, device=device)
@@ -331,11 +331,11 @@ if __name__ == "__main__":
                 loss = F.huber_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
     
                 o = acc[alive_ray_mask]
-                loss += (-o*torch.log(o)).mean()*1e-4
+                loss += (-o*torch.log(o)).mean()*1e-3
 
                 loss_d = 0.
                 for (weight, t_starts, t_ends, ray_indices) in extra:
-                    loss_d += distortion(ray_indices, weight, t_starts, t_ends) * 1e-4
+                    loss_d += distortion(ray_indices, weight, t_starts, t_ends) * 1e-3
 
                 loss = loss + loss_d
             
@@ -435,7 +435,7 @@ if __name__ == "__main__":
                             render_step_size=render_step_size,
                             render_bkgd=render_bkgd,
                             cone_angle=args.cone_angle,
-                            alpha_thre=alpha_thre,
+                            # alpha_thre=alpha_thre,
                         )
                         mse = F.mse_loss(rgb, pixels)
                         psnr = -10.0 * torch.log(mse) / np.log(10.0)

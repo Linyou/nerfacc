@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from radiance_fields.custom_ngp import NGPDradianceField
-from utils import render_image, Rays, render_image_test, render_image_test_v2, render_image_test_v3
+from utils import render_image, Rays, render_image_test_v3
 from visdom import Visdom
 
 import taichi as ti
@@ -151,7 +151,7 @@ class OrbitCamera:
 
 
 class NGPGUI:
-    def __init__(self, radius=2.5, render_kwargs=None):
+    def __init__(self, radius=1.5, render_kwargs=None):
 
         device = "cuda:0"
 
@@ -197,66 +197,6 @@ class NGPGUI:
         # print(cam.pose)
         with torch.autocast(device_type='cuda', dtype=torch.float16):
             rays = get_rays(cam.K, torch.cuda.FloatTensor(cam.pose), self.W, self.H)
-            # print(rays.viewdirs.dtype)
-
-            # nerfacc rendering 
-            # rgb, _, depth, n_rendering_samples, _ = render_image(
-            #     self.radiance_field,
-            #     self.occupancy_grid,
-            #     rays,
-            #     self.scene_aabb,
-            #     # rendering options
-            #     near_plane=self.near_plane,
-            #     far_plane=self.far_plane,
-            #     render_step_size=self.render_step_size,
-            #     render_bkgd=self.render_bkgd,
-            #     cone_angle=self.cone_angle,
-            #     alpha_thre=self.alpha_thre,
-            #     # test options
-            #     test_chunk_size=self.test_chunk_size,
-            #     # timestamps=self.timestamps,
-            # )
-
-            # ngp test rendering (samples level)
-            # rgb, _, depth, n_rendering_samples = render_image_test(
-            #     self.max_samples,
-            #     self.radiance_field,
-            #     self.occupancy_grid,
-            #     rays,
-            #     self.scene_aabb,
-            #     # rendering options
-            #     near_plane=self.near_plane,
-            #     far_plane=self.far_plane,
-            #     render_step_size=self.render_step_size,
-            #     render_bkgd=self.render_bkgd,
-            #     cone_angle=self.cone_angle,
-            #     alpha_thre=self.alpha_thre,
-            #     # test options
-            #     # test_chunk_size=self.test_chunk_size,
-            #     # timestamps=self.timestamps,
-            #     early_stop_eps=0.01,
-            # )
-
-            # ngp test rendering v2 (ngp + nerfacc)
-            # rgb, _, depth, n_rendering_samples, _ = render_image_test_v2(
-            #     self.max_samples,
-            #     self.radiance_field,
-            #     self.occupancy_grid,
-            #     rays,
-            #     self.scene_aabb,
-            #     # rendering options
-            #     near_plane=self.near_plane,
-            #     far_plane=self.far_plane,
-            #     render_step_size=self.render_step_size,
-            #     render_bkgd=self.render_bkgd,
-            #     cone_angle=self.cone_angle,
-            #     alpha_thre=self.alpha_thre,
-            #     # test options
-            #     test_chunk_size=self.test_chunk_size,
-            #     # timestamps=self.timestamps,
-            #     early_stop_eps=0.01,
-            # )
-
             # ngp test rendering v3 (rays level)
             rgb, _, depth, n_rendering_samples = render_image_test_v3(
                 self.max_samples,
@@ -466,34 +406,9 @@ def render_gui(ngp=None, args=None):
 
 
 if __name__ == "__main__":
+
     hparams = get_opts()
-
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument(
-    #     "--scene",
-    #     type=str,
-    #     default="garden",
-    #     choices=[
-    #         "garden",
-    #         "bicycle",
-    #         "bonsai",
-    #         "counter",
-    #         "kitchen",
-    #         "room",
-    #         "stump",
-    #     ],
-    #     help="which scene to use",
-    # )
-    # parser.add_argument(
-    #     '-d',
-    #     "--distortion_loss",
-    #     action="store_true",
-    #     help="use a distortion loss",
-    # )
-    # parser.add_argument("--cone_angle", type=float, default=0.0039)
-    # hparams = parser.parse_args()
-
-    args = get_ngp_args(hparams)
+    args= get_ngp_args(hparams)
     ngp = NGPGUI(render_kwargs=args)
 
     # ngp = NGPGUI(args=hparams)

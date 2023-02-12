@@ -97,7 +97,7 @@ class NGPradianceField(torch.nn.Module):
 
         self.geo_feat_dim = geo_feat_dim
         per_level_scale = math.exp(
-            math.log(2048 * self.box_scale / base_resolution) / (n_levels - 1)
+            math.log(4096 * self.box_scale / base_resolution) / (n_levels - 1)
         )  # 1.4472692012786865
         per_level_scale = 1.4472692012786865
 

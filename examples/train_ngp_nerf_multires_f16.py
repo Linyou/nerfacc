@@ -18,6 +18,8 @@ from utils import render_image, set_random_seed, render_image_test_v3
 
 from nerfacc import OccupancyGrid
 
+from show_gui_unbound import NGPGUI, render_gui
+
 import apex
 
 import taichi as ti
@@ -69,7 +71,12 @@ parser.add_argument(
     action="store_true",
     help="use a opacity loss",
 )
-parser.add_argument("--cone_angle", type=float, default=0.0039)
+parser.add_argument(
+    "--gui_only",
+    action="store_true",
+    help="use a opacity loss",
+)
+parser.add_argument("--cone_angle", type=float, default=0.004)
 args = parser.parse_args()
 
 # for reproducibility
@@ -82,6 +89,7 @@ target_sample_batch_size = 1 << 18  # train with 1M samples per batch
 grid_resolution = 128  # resolution of the occupancy grid
 grid_nlvl = 4  # number of levels of the occupancy grid
 render_step_size = 1e-3  # render step size
+# render_step_size = 0.0016914558667675782
 alpha_thre = 1e-2  # skipping threshold on alpha
 max_steps = 20000  # training steps
 aabb_scale = 1 << (grid_nlvl - 1)  # scale up the the aabb as pesudo unbounded
@@ -93,8 +101,8 @@ train_dataset = SubjectLoader(
     subject_id=args.scene,
     root_fp=data_root_fp,
     split="train",
-    num_rays=16384,  # initial number of rays
-    color_bkgd_aug="random",
+    num_rays=8192,  # initial number of rays
+    color_bkgd_aug="black",
     factor=4,
     device=device,
 )
@@ -103,6 +111,7 @@ test_dataset = SubjectLoader(
     root_fp=data_root_fp,
     split="test",
     num_rays=None,
+    color_bkgd_aug="black",
     factor=4,
     device=device,
 )
@@ -130,62 +139,144 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     max_epoch,
     lr/30
 )
+
 occupancy_grid = OccupancyGrid(
     roi_aabb=aabb, resolution=grid_resolution, levels=grid_nlvl
 ).to(device)
+camera_fuse = torch.cat([
+    train_dataset.camtoworlds,
+    # test_dataset.camtoworlds,
+])
+occupancy_grid.mark_invisible_cells(
+    train_dataset.K, 
+    camera_fuse, 
+    [train_dataset.width, train_dataset.height],
+    near_plane,
+)
+
+if args.gui_only:
+    state_dict = torch.load('multires.pth')
+    radiance_field.load_state_dict(state_dict["radiance_field"])
+    occupancy_grid.load_state_dict(state_dict["occupancy_grid"])
+
+
+    gui_args = {
+        'train_dataset': train_dataset, 
+        'test_dataset': test_dataset, 
+        'radiance_field': radiance_field, 
+        'occupancy_grid': occupancy_grid,
+        'scene_aabb': aabb_bkgd,
+        'near_plane': near_plane,
+        'far_plane': None,
+        'alpha_thre': alpha_thre,
+        'cone_angle': args.cone_angle,
+        # 'test_chunk_size': args.test_chunk_size,
+        'render_bkgd': torch.zeros(3, device=device),
+        'render_step_size': render_step_size,
+        'args_aabb': None,
+        'contraction_type': None,
+    }
+
+    ngp = NGPGUI(render_kwargs=gui_args)
+    render_gui(ngp)
+    exit()
+
 
 # setup visualizer to inspect camera and aabb
-# vis = nerfvis.Scene("nerf")
+vis = nerfvis.Scene("nerf")
 
-# vis.add_camera_frustum(
-#     "train_camera",
-#     focal_length=train_dataset.K[0, 0].item(),
-#     image_width=train_dataset.images.shape[2],
-#     image_height=train_dataset.images.shape[1],
-#     z=0.3,
-#     r=train_dataset.camtoworlds[:, :3, :3],
-#     t=train_dataset.camtoworlds[:, :3, -1],
-# )
+vis.add_camera_frustum(
+    "train_camera",
+    focal_length=train_dataset.K[0, 0].item(),
+    image_width=train_dataset.images.shape[2],
+    image_height=train_dataset.images.shape[1],
+    z=0.1,
+    r=train_dataset.camtoworlds[:, :3, :3],
+    t=train_dataset.camtoworlds[:, :3, -1],
+)
 
-# p1 = aabb[:3].cpu().numpy()
-# p2 = aabb[3:].cpu().numpy()
-# verts, segs = [
-#     [p1[0], p1[1], p1[2]],
-#     [p1[0], p1[1], p2[2]],
-#     [p1[0], p2[1], p2[2]],
-#     [p1[0], p2[1], p1[2]],
-#     [p2[0], p1[1], p1[2]],
-#     [p2[0], p1[1], p2[2]],
-#     [p2[0], p2[1], p2[2]],
-#     [p2[0], p2[1], p1[2]],
-# ], [
-#     [0, 1],
-#     [1, 2],
-#     [2, 3],
-#     [3, 0],
-#     [4, 5],
-#     [5, 6],
-#     [6, 7],
-#     [7, 4],
-#     [0, 4],
-#     [1, 5],
-#     [2, 6],
-#     [3, 7],
-# ]
-# vis.add_lines(
-#     "aabb",
-#     np.array(verts).astype(dtype=np.float32),
-#     segs=np.array(segs),
-# )
+occ_non_vis = occupancy_grid.get_non_visiable()
+for level, occ_i in enumerate(occ_non_vis):
+    occ_i = occ_i.cpu().numpy()
+    print(occ_i.shape)
+    vis.add_points(
+        f"occ_{level}",
+        occ_i,
+        point_size=2**(level),  
+    )
 
-# vis.display(port=8889, serve_nonblocking=True)
+p1 = aabb[:3].cpu().numpy()
+p2 = aabb[3:].cpu().numpy()
+verts, segs = [
+    [p1[0], p1[1], p1[2]],
+    [p1[0], p1[1], p2[2]],
+    [p1[0], p2[1], p2[2]],
+    [p1[0], p2[1], p1[2]],
+    [p2[0], p1[1], p1[2]],
+    [p2[0], p1[1], p2[2]],
+    [p2[0], p2[1], p2[2]],
+    [p2[0], p2[1], p1[2]],
+], [
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0],
+    [4, 5],
+    [5, 6],
+    [6, 7],
+    [7, 4],
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7],
+]
+vis.add_lines(
+    "aabb",
+    np.array(verts).astype(dtype=np.float32),
+    segs=np.array(segs),
+)
+
+p1 = aabb_bkgd[:3].cpu().numpy()
+p2 = aabb_bkgd[3:].cpu().numpy()
+verts, segs = [
+    [p1[0], p1[1], p1[2]],
+    [p1[0], p1[1], p2[2]],
+    [p1[0], p2[1], p2[2]],
+    [p1[0], p2[1], p1[2]],
+    [p2[0], p1[1], p1[2]],
+    [p2[0], p1[1], p2[2]],
+    [p2[0], p2[1], p2[2]],
+    [p2[0], p2[1], p1[2]],
+], [
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0],
+    [4, 5],
+    [5, 6],
+    [6, 7],
+    [7, 4],
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7],
+]
+vis.add_lines(
+    "aabb_bkgd",
+    np.array(verts).astype(dtype=np.float32),
+    segs=np.array(segs),
+)
+
+vis.display(port=8889, serve_nonblocking=True)
 
 
 # training
+step = 0
 epochs = 1
 tic = time.time()
 progress_bar = tqdm.tqdm(total=one_epoch, desc=f'epoch: {epochs}/{max_epoch}')
-for step in range(max_steps + 1):
+# for _ in range(max_steps + 1):
+while step < (max_steps + 1):
     radiance_field.train()
 
     i = torch.randint(0, len(train_dataset), (1,)).item()
@@ -200,9 +291,10 @@ for step in range(max_steps + 1):
         density = radiance_field.query_density(x)
         return density * step_size
 
+    # update occupancy grid
+    occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
+
     with torch.autocast(device_type='cuda', dtype=torch.float16):
-        # update occupancy grid
-        occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
 
         # render
         rgb, acc, depth, n_rendering_samples, extra_info = render_image(
@@ -227,17 +319,17 @@ for step in range(max_steps + 1):
 
         # compute loss
         # loss = F.smooth_l1_loss(rgb, pixels)
-        # loss = F.huber_loss(rgb, pixels)
-        loss = F.mse_loss(rgb, pixels)
+        loss = F.huber_loss(rgb, pixels)
+        # loss = F.mse_loss(rgb, pixels)
 
         if args.distortion_loss:
             loss_distor = 0.
             for (weight, t_starts, t_ends, ray_indices) in extra_info:
-                loss_distor += distortion(ray_indices, weight, t_starts, t_ends) * 1e-4
+                loss_distor += distortion(ray_indices, weight, t_starts, t_ends) * 1e-3
             loss += loss_distor
 
         if args.use_opacity_loss:
-            loss_o = (-acc*torch.log(acc)).mean()*1e-4
+            loss_o = (-acc*torch.log(acc)).mean()*1e-3
             loss += loss_o
 
     optimizer.zero_grad()
@@ -252,7 +344,9 @@ for step in range(max_steps + 1):
     if step % 1000 == 0:
 
         if not scale > grad_scaler.get_scale():
-                scheduler.step()
+            scheduler.step()
+        else:
+            continue
 
         elapsed_time = time.time() - tic
         loss = F.mse_loss(rgb, pixels)
@@ -320,28 +414,38 @@ for step in range(max_steps + 1):
 
                 # if step != max_steps:
 
-            # def nerfvis_eval_fn(x, dirs):
-            #     density, embedding = radiance_field.query_density(
-            #         x, return_feat=True
+            # occ_non_vis = occupancy_grid.get_non_visiable()
+            # for level, occ_i in enumerate(occ_non_vis):
+            #     occ_i = occ_i.cpu().numpy()
+            #     print(occ_i.shape)
+            #     vis.add_points(
+            #         f"occ_{level}",
+            #         occ_i,
+            #         point_size=2**(5 - level),  
             #     )
-            #     embedding = embedding.expand(-1, dirs.shape[1], -1)
-            #     dirs = dirs.expand(embedding.shape[0], -1, -1)
-            #     rgb = radiance_field._query_rgb(
-            #         dirs, embedding=embedding, apply_act=False
-            #     )
-            #     return rgb, density
 
-            # vis.remove("nerf")
-            # vis.add_nerf(
-            #     name="nerf",
-            #     eval_fn=nerfvis_eval_fn,
-            #     center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
-            #     radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
-            #     use_dirs=True,
-            #     reso=128,
-            #     sigma_thresh=1.0,
-            # )
-            # vis.display(port=8889, serve_nonblocking=True)
+            def nerfvis_eval_fn(x, dirs):
+                density, embedding = radiance_field.query_density(
+                    x, return_feat=True
+                )
+                embedding = embedding.expand(-1, dirs.shape[1], -1)
+                dirs = dirs.expand(embedding.shape[0], -1, -1)
+                rgb = radiance_field._query_rgb(
+                    dirs, embedding=embedding, apply_act=False
+                )
+                return rgb, density
+
+            vis.remove("nerf")
+            vis.add_nerf(
+                name="nerf",
+                eval_fn=nerfvis_eval_fn,
+                center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
+                radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
+                use_dirs=True,
+                reso=128,
+                sigma_thresh=1.0,
+            )
+            vis.display(port=8889, serve_nonblocking=True)
 
             imageio.imwrite(
                 "rgb_test.png",
@@ -368,3 +472,5 @@ for step in range(max_steps + 1):
             },
             "multires.pth"
         )
+
+    step += 1

@@ -805,12 +805,14 @@ def get_ngp_multires_args(args):
         'occupancy_grid': occupancy_grid,
         'scene_aabb': aabb_bkgd,
         'near_plane': near_plane,
+        'far_plane': None,
         'alpha_thre': alpha_thre,
         'cone_angle': args.cone_angle,
         # 'test_chunk_size': args.test_chunk_size,
-        'render_bkgd': torch.ones(3, device=device),
+        'render_bkgd': torch.zeros(3, device=device),
         'render_step_size': render_step_size,
-        # 'args_aabb': np.array(args.aabb),
+        'args_aabb': None,
+        'contraction_type': None,
     }
 
     return gui_args
