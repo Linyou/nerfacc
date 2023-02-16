@@ -249,21 +249,6 @@ def ray_marching(
         cone_angle,
     )
 
-    # packed_info, ray_indices, t_starts, t_ends = _C.ray_marching(
-    #     # rays
-    #     rays_o.contiguous(),
-    #     rays_d.contiguous(),
-    #     t_min.contiguous(),
-    #     t_max.contiguous(),
-    #     # coontraction and grid
-    #     grid_roi_aabb.contiguous(),
-    #     grid_binary.contiguous(),
-    #     contraction_type,
-    #     # sampling
-    #     render_step_size,
-    #     cone_angle,
-    # )
-
     # skip invisible space
     if sigma_fn is not None or alpha_fn is not None:
         # Query sigma without gradients
@@ -330,7 +315,7 @@ def ray_marching_test_v3(
         )
         contraction_type = ContractionType.AABB.to_cpp_version()
 
-    grid_roi_aabb = grid_roi_aabb.to(rays_o.dtype)
+    # grid_roi_aabb = grid_roi_aabb.to(rays_o.dtype)
     # t_min = t_min.contiguous()
     # (
     #     packed_info, ray_indices,

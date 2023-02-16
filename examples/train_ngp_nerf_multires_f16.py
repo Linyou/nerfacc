@@ -14,7 +14,7 @@ import tqdm
 from torch import Tensor
 from datasets.nerf_360_v2 import SubjectLoader
 from radiance_fields.ngp import NGPradianceField
-from utils import render_image, set_random_seed, render_image_test_v3
+from utils import render_image, set_random_seed, render_image_test_v3, namedtuple_map
 
 from nerfacc import OccupancyGrid
 
@@ -64,12 +64,6 @@ parser.add_argument(
     "--distortion_loss",
     action="store_true",
     help="use a distortion loss",
-)
-parser.add_argument(
-    '-o',
-    "--use_opacity_loss",
-    action="store_true",
-    help="use a opacity loss",
 )
 parser.add_argument(
     "--gui_only",
@@ -183,91 +177,91 @@ if args.gui_only:
 
 
 # setup visualizer to inspect camera and aabb
-vis = nerfvis.Scene("nerf")
+# vis = nerfvis.Scene("nerf")
 
-vis.add_camera_frustum(
-    "train_camera",
-    focal_length=train_dataset.K[0, 0].item(),
-    image_width=train_dataset.images.shape[2],
-    image_height=train_dataset.images.shape[1],
-    z=0.1,
-    r=train_dataset.camtoworlds[:, :3, :3],
-    t=train_dataset.camtoworlds[:, :3, -1],
-)
+# vis.add_camera_frustum(
+#     "train_camera",
+#     focal_length=train_dataset.K[0, 0].item(),
+#     image_width=train_dataset.images.shape[2],
+#     image_height=train_dataset.images.shape[1],
+#     z=0.1,
+#     r=train_dataset.camtoworlds[:, :3, :3],
+#     t=train_dataset.camtoworlds[:, :3, -1],
+# )
 
-occ_non_vis = occupancy_grid.get_non_visiable()
-for level, occ_i in enumerate(occ_non_vis):
-    occ_i = occ_i.cpu().numpy()
-    print(occ_i.shape)
-    vis.add_points(
-        f"occ_{level}",
-        occ_i,
-        point_size=2**(level),  
-    )
+# occ_non_vis = occupancy_grid.get_non_visiable()
+# for level, occ_i in enumerate(occ_non_vis):
+#     occ_i = occ_i.cpu().numpy()
+#     print(occ_i.shape)
+#     vis.add_points(
+#         f"occ_{level}",
+#         occ_i,
+#         point_size=2**(level),  
+#     )
 
-p1 = aabb[:3].cpu().numpy()
-p2 = aabb[3:].cpu().numpy()
-verts, segs = [
-    [p1[0], p1[1], p1[2]],
-    [p1[0], p1[1], p2[2]],
-    [p1[0], p2[1], p2[2]],
-    [p1[0], p2[1], p1[2]],
-    [p2[0], p1[1], p1[2]],
-    [p2[0], p1[1], p2[2]],
-    [p2[0], p2[1], p2[2]],
-    [p2[0], p2[1], p1[2]],
-], [
-    [0, 1],
-    [1, 2],
-    [2, 3],
-    [3, 0],
-    [4, 5],
-    [5, 6],
-    [6, 7],
-    [7, 4],
-    [0, 4],
-    [1, 5],
-    [2, 6],
-    [3, 7],
-]
-vis.add_lines(
-    "aabb",
-    np.array(verts).astype(dtype=np.float32),
-    segs=np.array(segs),
-)
+# p1 = aabb[:3].cpu().numpy()
+# p2 = aabb[3:].cpu().numpy()
+# verts, segs = [
+#     [p1[0], p1[1], p1[2]],
+#     [p1[0], p1[1], p2[2]],
+#     [p1[0], p2[1], p2[2]],
+#     [p1[0], p2[1], p1[2]],
+#     [p2[0], p1[1], p1[2]],
+#     [p2[0], p1[1], p2[2]],
+#     [p2[0], p2[1], p2[2]],
+#     [p2[0], p2[1], p1[2]],
+# ], [
+#     [0, 1],
+#     [1, 2],
+#     [2, 3],
+#     [3, 0],
+#     [4, 5],
+#     [5, 6],
+#     [6, 7],
+#     [7, 4],
+#     [0, 4],
+#     [1, 5],
+#     [2, 6],
+#     [3, 7],
+# ]
+# vis.add_lines(
+#     "aabb",
+#     np.array(verts).astype(dtype=np.float32),
+#     segs=np.array(segs),
+# )
 
-p1 = aabb_bkgd[:3].cpu().numpy()
-p2 = aabb_bkgd[3:].cpu().numpy()
-verts, segs = [
-    [p1[0], p1[1], p1[2]],
-    [p1[0], p1[1], p2[2]],
-    [p1[0], p2[1], p2[2]],
-    [p1[0], p2[1], p1[2]],
-    [p2[0], p1[1], p1[2]],
-    [p2[0], p1[1], p2[2]],
-    [p2[0], p2[1], p2[2]],
-    [p2[0], p2[1], p1[2]],
-], [
-    [0, 1],
-    [1, 2],
-    [2, 3],
-    [3, 0],
-    [4, 5],
-    [5, 6],
-    [6, 7],
-    [7, 4],
-    [0, 4],
-    [1, 5],
-    [2, 6],
-    [3, 7],
-]
-vis.add_lines(
-    "aabb_bkgd",
-    np.array(verts).astype(dtype=np.float32),
-    segs=np.array(segs),
-)
+# p1 = aabb_bkgd[:3].cpu().numpy()
+# p2 = aabb_bkgd[3:].cpu().numpy()
+# verts, segs = [
+#     [p1[0], p1[1], p1[2]],
+#     [p1[0], p1[1], p2[2]],
+#     [p1[0], p2[1], p2[2]],
+#     [p1[0], p2[1], p1[2]],
+#     [p2[0], p1[1], p1[2]],
+#     [p2[0], p1[1], p2[2]],
+#     [p2[0], p2[1], p2[2]],
+#     [p2[0], p2[1], p1[2]],
+# ], [
+#     [0, 1],
+#     [1, 2],
+#     [2, 3],
+#     [3, 0],
+#     [4, 5],
+#     [5, 6],
+#     [6, 7],
+#     [7, 4],
+#     [0, 4],
+#     [1, 5],
+#     [2, 6],
+#     [3, 7],
+# ]
+# vis.add_lines(
+#     "aabb_bkgd",
+#     np.array(verts).astype(dtype=np.float32),
+#     segs=np.array(segs),
+# )
 
-vis.display(port=8889, serve_nonblocking=True)
+# vis.display(port=8889, serve_nonblocking=True)
 
 
 # training
@@ -276,15 +270,17 @@ epochs = 1
 tic = time.time()
 progress_bar = tqdm.tqdm(total=one_epoch, desc=f'epoch: {epochs}/{max_epoch}')
 # for _ in range(max_steps + 1):
+aabb_bkgd = aabb_bkgd.to(torch.float16)
 while step < (max_steps + 1):
     radiance_field.train()
 
     i = torch.randint(0, len(train_dataset), (1,)).item()
     data = train_dataset[i]
 
-    render_bkgd = data["color_bkgd"]
-    rays = data["rays"]
-    pixels = data["pixels"]
+    render_bkgd = data["color_bkgd"].to(torch.float16)
+    # rays = data["rays"]
+    rays = namedtuple_map(lambda r: r.to(torch.float16), data["rays"])
+    pixels = data["pixels"].to(torch.float16)
 
     def occ_eval_fn(x):
         step_size = render_step_size
@@ -319,18 +315,14 @@ while step < (max_steps + 1):
 
         # compute loss
         # loss = F.smooth_l1_loss(rgb, pixels)
-        loss = F.huber_loss(rgb, pixels)
-        # loss = F.mse_loss(rgb, pixels)
+        # loss = F.huber_loss(rgb, pixels)
+        loss = F.mse_loss(rgb, pixels)
 
         if args.distortion_loss:
             loss_distor = 0.
             for (weight, t_starts, t_ends, ray_indices) in extra_info:
                 loss_distor += distortion(ray_indices, weight, t_starts, t_ends) * 1e-3
             loss += loss_distor
-
-        if args.use_opacity_loss:
-            loss_o = (-acc*torch.log(acc)).mean()*1e-3
-            loss += loss_o
 
     optimizer.zero_grad()
     # (loss * 1024).backward()
@@ -351,8 +343,6 @@ while step < (max_steps + 1):
         elapsed_time = time.time() - tic
         loss = F.mse_loss(rgb, pixels)
         loss_log = f"loss={loss:.5f} | "
-        if args.use_opacity_loss:
-            loss_log += f"opac={loss_o:.7f} | "
         if args.distortion_loss:
             loss_log += f"dist={loss_distor:.7f} | "
         prog = (
@@ -385,6 +375,7 @@ while step < (max_steps + 1):
         radiance_field.eval()
 
         psnrs = []
+        aabb_bkgd = aabb_bkgd.to(torch.float32)
         with torch.no_grad():
             for i in tqdm.tqdm(range(len(test_dataset))):
                 data = test_dataset[i]
@@ -424,28 +415,28 @@ while step < (max_steps + 1):
             #         point_size=2**(5 - level),  
             #     )
 
-            def nerfvis_eval_fn(x, dirs):
-                density, embedding = radiance_field.query_density(
-                    x, return_feat=True
-                )
-                embedding = embedding.expand(-1, dirs.shape[1], -1)
-                dirs = dirs.expand(embedding.shape[0], -1, -1)
-                rgb = radiance_field._query_rgb(
-                    dirs, embedding=embedding, apply_act=False
-                )
-                return rgb, density
+            # def nerfvis_eval_fn(x, dirs):
+            #     density, embedding = radiance_field.query_density(
+            #         x, return_feat=True
+            #     )
+            #     embedding = embedding.expand(-1, dirs.shape[1], -1)
+            #     dirs = dirs.expand(embedding.shape[0], -1, -1)
+            #     rgb = radiance_field._query_rgb(
+            #         dirs, embedding=embedding, apply_act=False
+            #     )
+            #     return rgb, density
 
-            vis.remove("nerf")
-            vis.add_nerf(
-                name="nerf",
-                eval_fn=nerfvis_eval_fn,
-                center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
-                radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
-                use_dirs=True,
-                reso=128,
-                sigma_thresh=1.0,
-            )
-            vis.display(port=8889, serve_nonblocking=True)
+            # vis.remove("nerf")
+            # vis.add_nerf(
+            #     name="nerf",
+            #     eval_fn=nerfvis_eval_fn,
+            #     center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
+            #     radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
+            #     use_dirs=True,
+            #     reso=128,
+            #     sigma_thresh=1.0,
+            # )
+            # vis.display(port=8889, serve_nonblocking=True)
 
             imageio.imwrite(
                 "rgb_test.png",
@@ -469,6 +460,7 @@ while step < (max_steps + 1):
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
                 "step": step,
+                "psnr_avg": psnr_avg,
             },
             "multires.pth"
         )
