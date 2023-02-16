@@ -13,13 +13,13 @@ import torch
 import torch.nn.functional as F
 import tqdm
 from radiance_fields.ngp import NGPradianceField
-from utils import render_image, set_random_seed, namedtuple_map, render_image_test_v2, render_image_test_v3
+from utils import render_image, set_random_seed, namedtuple_map, render_image_test_v3
 from tqdm import tqdm
 
 from nerfacc import ContractionType, OccupancyGrid, unpack_data
 
 from torch import Tensor
-from torch_efficient_distloss import flatten_eff_distloss, eff_distloss
+from torch_efficient_distloss import flatten_eff_distloss
 import apex
 
 import cv2
@@ -196,9 +196,9 @@ if __name__ == "__main__":
         scene_aabb = None
         near_plane = 0.02
         far_plane = 100
-        render_step_size = 1e-3
-        # alpha_thre = 1e-2
-        alpha_thre = 0.0
+        render_step_size = 1e-2
+        alpha_thre = 1e-2
+        # alpha_thre = 0.0
     else:
         contraction_type = ContractionType.AABB
         scene_aabb = torch.tensor(args.aabb, dtype=torch.float32, device=device)
@@ -246,7 +246,16 @@ if __name__ == "__main__":
         resolution=grid_resolution,
         contraction_type=contraction_type,
     ).to(device)
-
+    camera_fuse = torch.cat([
+        train_dataset.camtoworlds,
+        # test_dataset.camtoworlds,
+    ])
+    occupancy_grid.mark_invisible_cells(
+        train_dataset.K.to(device), 
+        camera_fuse.to(device), 
+        [train_dataset.width, train_dataset.height],
+        near_plane,
+    )
     # logger file
     results_root = '/home/loyot/workspace/code/training_results/nerfacc'
     logger.remove(0)
@@ -328,10 +337,10 @@ if __name__ == "__main__":
                 alive_ray_mask = acc.squeeze(-1) > 0
 
                 # compute loss
-                loss = F.huber_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
+                loss = F.mse_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
     
-                o = acc[alive_ray_mask]
-                loss += (-o*torch.log(o)).mean()*1e-3
+                # o = acc[alive_ray_mask]
+                # loss += (-o*torch.log(o)).mean()*1e-3
 
                 loss_d = 0.
                 for (weight, t_starts, t_ends, ray_indices) in extra:
@@ -435,7 +444,7 @@ if __name__ == "__main__":
                             render_step_size=render_step_size,
                             render_bkgd=render_bkgd,
                             cone_angle=args.cone_angle,
-                            # alpha_thre=alpha_thre,
+                            alpha_thre=alpha_thre,
                         )
                         mse = F.mse_loss(rgb, pixels)
                         psnr = -10.0 * torch.log(mse) / np.log(10.0)

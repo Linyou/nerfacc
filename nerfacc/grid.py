@@ -314,11 +314,12 @@ class OccupancyGrid(Grid):
             coords = self.grid_coords[indices]
             for i in range(0, len(indices), chunk):
                 x = coords[i:i+chunk]/(self.resolution-1)
+                indices_chunk = indices[i:i+chunk]
                 if self._contraction_type == ContractionType.UN_BOUNDED_SPHERE:
                     # only the points inside the sphere are valid
                     mask = (x - 0.5).norm(dim=1) < 0.5
                     x = x[mask]
-                    indices = indices[mask]
+                    indices_chunk = indices_chunk[mask]
                 # voxel coordinates [0, 1]^3 -> world
                 xyzs_w = contract_inv(
                     (x - 0.5) * (2**lvl) + 0.5,
@@ -337,7 +338,7 @@ class OccupancyGrid(Grid):
 
                 valid_mask = (count>0)
                 cell_ids_base = lvl * self.num_cells_per_lvl 
-                self.occs[cell_ids_base+indices[i:i+chunk]] = \
+                self.occs[cell_ids_base+indices_chunk] = \
                     torch.where(valid_mask, 0., -1.)
 
         print("grid after mask: ", self.occs[self.occs>=0].shape)
