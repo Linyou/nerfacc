@@ -14,12 +14,70 @@ from tqdm import tqdm
 from .utils import Rays
 from .pose_ulils import correct_poses_bounds
 
+def similarity_from_cameras(c2w, strict_scaling):
+    """
+    reference: nerf-factory
+    Get a similarity transform to normalize dataset
+    from c2w (OpenCV convention) cameras
+    :param c2w: (N, 4)
+    :return T (4,4) , scale (float)
+    """
+    t = c2w[:, :3, 3]
+    R = c2w[:, :3, :3]
+
+    # (1) Rotate the world so that z+ is the up axis
+    # we estimate the up axis by averaging the camera up axes
+    ups = np.sum(R * np.array([0, -1.0, 0]), axis=-1)
+    world_up = np.mean(ups, axis=0)
+    world_up /= np.linalg.norm(world_up)
+
+    up_camspace = np.array([0.0, -1.0, 0.0])
+    c = (up_camspace * world_up).sum()
+    cross = np.cross(world_up, up_camspace)
+    skew = np.array(
+        [
+            [0.0, -cross[2], cross[1]],
+            [cross[2], 0.0, -cross[0]],
+            [-cross[1], cross[0], 0.0],
+        ]
+    )
+    if c > -1:
+        R_align = np.eye(3) + skew + (skew @ skew) * 1 / (1 + c)
+    else:
+        # In the unlikely case the original data has y+ up axis,
+        # rotate 180-deg about x axis
+        R_align = np.array([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+
+    #  R_align = np.eye(3) # DEBUG
+    R = R_align @ R
+    fwds = np.sum(R * np.array([0, 0.0, 1.0]), axis=-1)
+    t = (R_align @ t[..., None])[..., 0]
+
+    # (2) Recenter the scene using camera center rays
+    # find the closest point to the origin for each camera's center ray
+    nearest = t + (fwds * -t).sum(-1)[:, None] * fwds
+
+    # median for more robustness
+    translate = -np.median(nearest, axis=0)
+
+    #  translate = -np.mean(t, axis=0)  # DEBUG
+
+    transform = np.eye(4)
+    transform[:3, 3] = translate
+    transform[:3, :3] = R_align
+
+    # (3) Rescale the scene using camera distances
+    scale_fn = np.max if strict_scaling else np.median
+    scale = 1.0 / scale_fn(np.linalg.norm(t + translate, axis=-1))
+
+    return transform, scale
 
 def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=True):
 
     basedir = os.path.join(root_fp, subject_id)
     
     poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
+    # print("poses_arr: ", poses_arr.shape)
     poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
     bds = poses_arr[:, -2:].transpose([1,0])
     
@@ -45,6 +103,20 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
     WIDTH = int(poses[0, 1, -1])
 
     poses, poses_ref, bds = correct_poses_bounds(poses, bds)
+    print("poses shape: ", poses.shape)
+
+    # padding = np.zeros([poses.shape[0], 1, 4])
+    # padding[:, 0, 3] = 1
+    # poses = np.concatenate([poses[:, :, :4], padding], axis=1)
+    # print("poses shape: ", poses.shape)
+    # # normalize the scene
+    # T, sscale = similarity_from_cameras(
+    #     poses, strict_scaling=False
+    # )
+    # poses = np.einsum("nij, ki -> nkj", poses, T)
+    # poses[:, :3, 3] *= sscale
+
+    poses[:, :, 1:3] *= -1
 
     if split == 'train':
         video_list = video_list[1:]
@@ -65,7 +137,7 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
             v_name = video['video_name']
 
             pose = poses[i]
-            bd = bds[i]
+            # bd = bds[i]
 
             vids = video['images']
             
@@ -84,13 +156,13 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
                     timestamps.append(idx/sizeofimage)
                     # timestamps.append(0.)
                     poses_list.append(pose)
-                    bds_list.append(bd)
+                    # bds_list.append(bd)
             progress.refresh()
 
     images = torch.from_numpy(np.stack(images, axis=0))
     poses_list = np.array(poses_list).astype(np.float32)
     timestamps = np.array(timestamps).astype(np.float32)
-    bds_list = np.array(bds_list).astype(np.float32)
+    # bds_list = np.array(bds_list).astype(np.float32)
         
     return images, poses_list, timestamps, bds_list, sizeofimage+1, (focal, HEIGHT, WIDTH)
 
@@ -98,7 +170,7 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
 class SubjectLoader(torch.utils.data.Dataset):
     """Single subject data loader for training and evaluation."""
 
-    SPLITS = ["train", "val", "test"]
+    SPLITS = ["train", "test"]
     SUBJECT_IDS = [
         "coffee_martini",
         "cook_spinach", 
@@ -108,9 +180,7 @@ class SubjectLoader(torch.utils.data.Dataset):
          "sear_steak"
     ]
 
-    WIDTH, HEIGHT = 1352, 1014
-    NEAR, FAR = 6.84449427, 113.35576472
-    OPENGL_CAMERA = True
+    OPENGL_CAMERA = False
 
     def __init__(
         self,
@@ -124,6 +194,7 @@ class SubjectLoader(torch.utils.data.Dataset):
         batch_over_images: bool = True,
         factor: int = 1,
         read_image=True,
+        device: str = "cpu",
     ):
         super().__init__()
         assert split in self.SPLITS, "%s" % split
@@ -131,8 +202,6 @@ class SubjectLoader(torch.utils.data.Dataset):
         assert color_bkgd_aug in ["white", "black", "random"]
         self.split = split
         self.num_rays = num_rays
-        self.near = self.NEAR if near is None else near
-        self.far = self.FAR if far is None else far
         self.training = (num_rays is not None) and (
             split in ["train", "trainval"]
         )
