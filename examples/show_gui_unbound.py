@@ -151,7 +151,7 @@ class OrbitCamera:
 
 
 class NGPGUI:
-    def __init__(self, radius=1.5, render_kwargs=None):
+    def __init__(self, radius=1.5, render_kwargs=None, use_time=False):
 
         device = "cuda:0"
 
@@ -187,8 +187,10 @@ class NGPGUI:
         self.mean_samples = 0
         self.img_mode = 0
 
-
-        self.timestamps = torch.tensor([0.0], device=device)
+        if use_time:
+            self.timestamps = torch.tensor([0.0], device=device)
+        else:
+            self.timestamps = None
         self.max_samples = 100
 
     @torch.no_grad()
@@ -213,7 +215,7 @@ class NGPGUI:
                 alpha_thre=self.alpha_thre,
                 # test options
                 # test_chunk_size=self.test_chunk_size,
-                # timestamps=self.timestamps,
+                timestamps=self.timestamps,
                 # early_stop_eps=0.01,
             )
 

@@ -107,14 +107,23 @@ class CanonicalWarper(torch.nn.Module):
             out_dim = self.num_dim*2
         else:
             out_dim = self.num_dim
-
-        self.posi_encoder = tcnn.NetworkWithInputEncoding(
-            n_input_dims=num_dim+1,
+        self.fre = tcnn.Encoding(
+            n_input_dims=num_dim,
             encoding_config={
-                "otype": "Frequency",
-                "n_frequencies": 4
+                "otype": "Composite",
+                "nested": [
+                    {
+                        "n_dims_to_encode": 3,
+                        "otype": "Frequency",
+                        "degree": 4,
+                    },
+                    # {"otype": "Identity", "n_bins": 4, "degree": 4},
+                ],
             },
-            n_output_dims=out_dim,
+        )
+        self.posi_encoder = tcnn.Network(
+            n_input_dims=self.fre.n_output_dims,
+            n_output_dims=3,
             network_config={
                 "otype": "FullyFusedMLP",
                 "activation": "ReLU",
@@ -123,43 +132,92 @@ class CanonicalWarper(torch.nn.Module):
                 "n_hidden_layers": 3,
             },
         )
+        # self.posi_encoder = tcnn.NetworkWithInputEncoding(
+        #     n_input_dims=num_dim,
+        #     encoding_config={
+        #         "otype": "Composite",
+        #         "nested": [
+        #             {
+        #                 "n_dims_to_encode": 3, # Spatial dims
+        #                 "otype": "TriangleWave",
+        #                 "n_frequencies": 12
+        #             },
+        #             # {
+        #             #     "n_dims_to_encode": 3,
+        #             #     "otype": "HashGrid",
+        #             #     "n_levels": 16,
+        #             #     "n_features_per_level": 2,
+        #             #     "log2_hashmap_size": 19,
+        #             #     "base_resolution": 16,
+        #             #     "per_level_scale": 1.4472692012786865,
+        #             # }
+        #         ]
+        #     },
+        #     n_output_dims=out_dim,
+        #     network_config={
+        #         "otype": "FullyFusedMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 64,
+        #         "n_hidden_layers": 3,
+        #     },
+        # )
+        # self.posi_encoder = MLP(
+        #     input_dim=3,
+        #     output_dim=3,
+        #     net_depth=3,
+        #     net_width=64,
+        #     skip_layer=4,
+        #     output_enabled=True,
+        # )
 
     def forward(self, x, timestamps, time_id=None, aabb=None, mask=None):
         if not x.size(0) == 0:
-            if mask != None:
-                x_ori = x
-                x = x[mask]
-                timestamps = timestamps[mask]
+        # if mask != None:
+        #     x_ori = x
+        #     x = x[mask]
+        #     timestamps = timestamps[mask]
 
-            offsets = self.posi_encoder(torch.cat([x, timestamps], dim=-1))
-            if self.use_dive_offsets:
-                grid_move = offsets[:, 0:3]*self.MOVING_STEP
-                fine_move = (torch.special.expit(offsets[:, 3:])*2 - 1)*self.MOVING_STEP
-                # fine_move = F.tanh(offsets[:, 3:])*self.MOVING_STEP
-            else:
-                grid_move = offsets*self.MOVING_STEP
-                fine_move = torch.zeros_like(grid_move)
+        # offsets = self.posi_encoder(torch.cat([x, timestamps], dim=-1))
+        # if self.use_dive_offsets:
+        #     grid_move = offsets[:, 0:3]*self.MOVING_STEP
+        #     fine_move = (torch.special.expit(offsets[:, 3:])*2 - 1)*self.MOVING_STEP
+        #     move = grid_move + fine_move
+        #     # fine_move = F.tanh(offsets[:, 3:])*self.MOVING_STEP
+        # else:
+        #     grid_move = offsets*self.MOVING_STEP
+        #     fine_move = torch.zeros_like(grid_move)
 
-            move = grid_move + fine_move
+        #     move = grid_move 
 
-            if mask != None:
-                x_ori[mask] += move
-                x = x_ori
-                move_norm = torch.zeros_like(x[:, 0:1])
-                move_norm[mask] += move.norm(dim=-1)[:, None]
-            else:
-                x = move + x
-                move_norm = move.norm(dim=-1)[:, None]
-
-
+        # if mask != None:
+        #     x_ori[mask] += move
+        #     x = x_ori
+        #     move_norm = torch.zeros_like(x[:, 0:1])
+        #     move_norm[mask] += move.norm(dim=-1)[:, None]
+        # else:
+        #     x = move + x
+        #     move_norm = move.norm(dim=-1)[:, None]
+        # print("x shape: ", x.shape)
+        # if not x.size(0) == 0:
+            offsets = self.posi_encoder(self.fre(x))
+            x = offsets + x
+            print("grad x: ", x.requires_grad)
+            print("grad offsets: ", offsets.requires_grad)
         else:
-            move = torch.zeros_like(x)
-            move_norm = torch.zeros_like(x[:, 0:1])
-            grid_move = torch.zeros_like(x)
-            fine_move = torch.zeros_like(x)
+            print("zeros x")
+            offsets = torch.zeros_like(x)
+            x = offsets + x
+
+        # else:
+        #     move = torch.zeros_like(x)
+        #     move_norm = torch.zeros_like(x[:, 0:1])
+        #     grid_move = torch.zeros_like(x)
+        #     fine_move = torch.zeros_like(x)
 
 
-        return x.view(-1, self.num_dim), move, move_norm, grid_move, fine_move
+        # return x.view(-1, self.num_dim), move, move_norm, grid_move, fine_move
+        return x, None, None, None, None
 
 
 
@@ -177,6 +235,7 @@ class NGPDradianceField(NGPradianceField):
         density_activation: Callable = lambda x: trunc_exp(x - 1),
         unbounded: bool = False,
         geo_feat_dim: int = 15,
+        base_resolution: int = 16,
         n_levels: int = 16,
         log2_hashmap_size: int = 19,
         use_feat_predict: bool = False,
@@ -211,6 +270,10 @@ class NGPDradianceField(NGPradianceField):
         elif hash_level == 2:
             per_level_scale = 1.4472692012786865 # 4096
 
+        per_level_scale = math.exp(
+            math.log(4096 * 1 / base_resolution) / (n_levels - 1)
+        )  # 1.4472692012786865
+
         print('--NGPDradianceField configuration--')
         print(f'  moving_step: {moving_step}')
         print(f'  hash_level: {hash_level}, b: {per_level_scale:6f}')
@@ -236,9 +299,11 @@ class NGPDradianceField(NGPradianceField):
             use_dive_offsets=use_dive_offsets
         )
 
+
         # self.posi_encoder = SinusoidalEncoder(3, 0, 4, True)
-        self.time_encoder = SinusoidalEncoder(1, 0, 4, True)
-        self.time_encoder_feat = SinusoidalEncoderWithExp(1, 0, 6, True)
+        if self.use_time_embedding:
+            self.time_encoder = SinusoidalEncoder(1, 0, 4, True)
+            self.time_encoder_feat = SinusoidalEncoderWithExp(1, 0, 6, True)
 
         self.xyz_encoder = tcnn.Encoding(
             n_input_dims=num_dim,
@@ -395,9 +460,11 @@ class NGPDradianceField(NGPradianceField):
             mask=None
             # x_move = (x_move - aabb_min) / (aabb_max - aabb_min)
             # move = ((move - aabb_min) / (aabb_max - aabb_min)
-
         if not self.loose_move:
+            print("x shape: ", x.shape)
+            print("timestamps shape: ", timestamps.shape)
             x_move, move, move_norm, grid_move, fine_move = self.xyz_wrap(x, timestamps, time_id=time_id, aabb=self.aabb, mask=None)
+            print("x_move shape: ", x_move.shape)
         else:
             x_move = x
             move_norm = torch.zeros_like(x[:, 0:1])

@@ -190,9 +190,9 @@ def render_image_test_v3(
     # set t_min to 0.0, and t_max to 1e10. (the case of unbounded scene)
     # 4. always clip t_min with near_plane and t_max with far_plane if given.
     if scene_aabb is not None:
-        print('rays.origins: ', rays.origins.dtype)
-        print('rays.viewdirs: ', rays.viewdirs.dtype)
-        print('scene_aabb: ', scene_aabb.dtype)
+        # print('rays.origins: ', rays.origins.dtype)
+        # print('rays.viewdirs: ', rays.viewdirs.dtype)
+        # print('scene_aabb: ', scene_aabb.dtype)
         t_min, t_max = ray_aabb_intersect(rays.origins, rays.viewdirs, scene_aabb)
     else:
         t_min = torch.zeros_like(rays.origins[..., 0])

@@ -103,7 +103,6 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
     WIDTH = int(poses[0, 1, -1])
 
     poses, poses_ref, bds = correct_poses_bounds(poses, bds)
-    print("poses shape: ", poses.shape)
 
     # padding = np.zeros([poses.shape[0], 1, 4])
     # padding[:, 0, 3] = 1
@@ -116,7 +115,14 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
     # poses = np.einsum("nij, ki -> nkj", poses, T)
     # poses[:, :3, 3] *= sscale
 
+    print("poses shape: ", poses.shape)
+
     poses[:, :, 1:3] *= -1
+    # scale
+    pose_radius_scale = 0.4
+    poses[:, :, 3] *= pose_radius_scale
+    # offset
+    poses[:, :, 3] += np.array([[0,0,1.0]])
 
     if split == 'train':
         video_list = video_list[1:]
@@ -228,8 +234,8 @@ class SubjectLoader(torch.utils.data.Dataset):
 
         print("showing a pose: ")
         print(self.poses[0].astype(np.float16))
-        print("showing timestamps: ")
-        print(self.timestamps)
+        # print("showing timestamps: ")
+        # print(self.timestamps)
         self.K = torch.tensor(
             [
                 [self.focal, 0, self.WIDTH / 2.0],
