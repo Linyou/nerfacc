@@ -12,9 +12,11 @@ import torch
 import torch.nn.functional as F
 import tqdm
 from torch import Tensor
-from datasets.dnerf_3d_video import SubjectLoader
+# from datasets.dnerf_3d_video import SubjectLoader
+from datasets.hypernerf import SubjectLoader
 from radiance_fields.ngp import NGPradianceField
-from radiance_fields.custom_ngp import NGPDradianceField
+from radiance_fields.dngp import NGPradianceField as DNGPradianceField
+# from radiance_fields.custom_ngp import NGPDradianceField
 from utils import render_image, set_random_seed, render_image_test_v3, namedtuple_map
 
 from nerfacc import OccupancyGrid
@@ -57,6 +59,24 @@ parser.add_argument(
         "flame_salmon_1",
         "flame_steak", 
         "sear_steak",
+        # hyperNerf
+        'interp_aleks-teapot',
+        'interp_chickchicken',
+        'interp_cut-lemon',
+        'interp_hand',
+        'interp_slice-banana',
+        'interp_torchocolate',
+        'misc_americano',
+        'misc_cross-hands',
+        'misc_espresso',
+        'misc_keyboard',
+        'misc_oven-mitts',
+        'misc_split-cookie',
+        'misc_tamping',
+        'vrig_3dprinter',
+        'vrig_broom',
+        'vrig_chicken',
+        'vrig_peel-banana',
     ],
     help="which scene to use",
 )
@@ -98,7 +118,8 @@ aabb_scale = 1 << (grid_nlvl - 1)  # scale up the the aabb as pesudo unbounded
 near_plane = 0.02
 
 # setup the dataset
-data_root_fp = "/home/loyot/workspace/Datasets/NeRF/3d_vedio_datasets/"
+# data_root_fp = "/home/loyot/workspace/Datasets/NeRF/3d_vedio_datasets/"
+data_root_fp = "/home/loyot/workspace/Datasets/NeRF/HyberNeRF/"
 train_dataset = SubjectLoader(
     subject_id=args.scene,
     root_fp=data_root_fp,
@@ -132,7 +153,7 @@ aabb_bkgd = enlarge_aabb(aabb, aabb_scale)
 grad_scaler = torch.cuda.amp.GradScaler()
 
 # setup the radiance field we want to train.
-radiance_field = NGPDradianceField(aabb=aabb_bkgd).to(device)
+radiance_field = DNGPradianceField(aabb=aabb_bkgd).to(device)
 # radiance_field.loose_move = True
 # optimizer = torch.optim.Adam(radiance_field.parameters(), lr=1e-2, eps=1e-15)
 lr = 1e-2
@@ -278,7 +299,7 @@ if args.vis_nerf:
         segs=np.array(segs),
     )
 
-    # vis.display(port=8889, serve_nonblocking=(not args.vis_blocking))
+    vis.display(port=8889, serve_nonblocking=(not args.vis_blocking))
 
 
 # training
@@ -291,7 +312,7 @@ aabb_bkgd = aabb_bkgd.to(torch.float16)
 # while step < (max_steps + 1):
 
 for _ in range(10000000):
-    for _, data in enumerate(train_dataloader):
+    for data in train_dataloader:
         radiance_field.train()
 
         i = torch.randint(0, len(train_dataset), (1,)).item()
@@ -301,7 +322,7 @@ for _ in range(10000000):
         # rays = data["rays"]
         rays = namedtuple_map(lambda r: r.to(torch.float16).to(device), data["rays"])
         pixels = data["pixels"].to(torch.float16).to(device)
-        timestamps = data["timestamps"].to(device)
+        timestamps = data["timestamps"].to(torch.float16).to(device)
 
         def occ_eval_fn(x):
             step_size = render_step_size
@@ -445,7 +466,7 @@ for _ in range(10000000):
                     #     )
 
                     def nerfvis_eval_fn(x, dirs):
-                        t = torch.zeros(x.shape[0], device=x.device)
+                        t = torch.zeros(*x.shape[:-1], 1, device=x.device)
                         density, embedding = radiance_field.query_density(
                             x, t, return_feat=True
                         )

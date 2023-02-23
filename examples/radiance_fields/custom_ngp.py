@@ -461,10 +461,10 @@ class NGPDradianceField(NGPradianceField):
             # x_move = (x_move - aabb_min) / (aabb_max - aabb_min)
             # move = ((move - aabb_min) / (aabb_max - aabb_min)
         if not self.loose_move:
-            print("x shape: ", x.shape)
-            print("timestamps shape: ", timestamps.shape)
+            # print("x shape: ", x.shape)
+            # print("timestamps shape: ", timestamps.shape)
             x_move, move, move_norm, grid_move, fine_move = self.xyz_wrap(x, timestamps, time_id=time_id, aabb=self.aabb, mask=None)
-            print("x_move shape: ", x_move.shape)
+            # print("x_move shape: ", x_move.shape)
         else:
             x_move = x
             move_norm = torch.zeros_like(x[:, 0:1])

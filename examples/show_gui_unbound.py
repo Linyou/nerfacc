@@ -51,8 +51,7 @@ def get_rays(K, pose, width, height, opengl=True):
         torch.stack(
             [
                 (x - K[0, 2] + 0.5) / K[0, 0],
-                (y - K[1, 2] + 0.5)
-                / K[1, 1]
+                (y - K[1, 2] + 0.5) / K[1, 1]
                 * (-1.0 if opengl else 1.0),
             ],
             dim=-1,
@@ -151,7 +150,7 @@ class OrbitCamera:
 
 
 class NGPGUI:
-    def __init__(self, radius=1.5, render_kwargs=None, use_time=False):
+    def __init__(self, radius=1.5, render_kwargs=None, use_time=False, opengl=True):
 
         device = "cuda:0"
 
@@ -174,8 +173,9 @@ class NGPGUI:
         self.args_aabb = render_kwargs['args_aabb']
 
 
-        # self.radiance_field.eval()
-        # self.occupancy_grid.eval()
+
+        self.radiance_field.eval()
+        self.occupancy_grid.eval()
 
         K, img_wh, pose = self.test_dataset.K, (self.test_dataset.width, self.test_dataset.height), self.test_dataset.camtoworlds
 
@@ -193,12 +193,14 @@ class NGPGUI:
             self.timestamps = None
         self.max_samples = 100
 
+        self.opengl = opengl
+
     @torch.no_grad()
     def render_cam(self, cam):
         t = time.time()
         # print(cam.pose)
         with torch.autocast(device_type='cuda', dtype=torch.float16):
-            rays = get_rays(cam.K, torch.cuda.FloatTensor(cam.pose), self.W, self.H)
+            rays = get_rays(cam.K, torch.cuda.FloatTensor(cam.pose), self.W, self.H, opengl=self.opengl)
             # ngp test rendering v3 (rays level)
             rgb, _, depth, n_rendering_samples = render_image_test_v3(
                 self.max_samples,
@@ -236,7 +238,7 @@ class NGPGUI:
 def write_buffer(W:ti.i32, H:ti.i32, x: ti.types.ndarray(), final_pixel:ti.template()):
     for i, j in ti.ndrange(W, H):
         for p in ti.static(range(3)):
-            final_pixel[i, j][p] = x[j, i, p]
+            final_pixel[i, j][p] = x[H-1-j, i, p]
 
 
 @torch.no_grad()
@@ -270,6 +272,7 @@ def render_gui(ngp=None, args=None):
 
 
     W, H = ngp.W, ngp.H
+    print("W:", type(W))
     final_pixel = ti.Vector.field(3, dtype=float, shape=(W, H))
 
     window = ti.ui.Window('Window Title', (W, H),)

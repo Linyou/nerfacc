@@ -1,7 +1,3 @@
-"""
-Copyright (c) 2022 Ruilong Li, UC Berkeley.
-"""
-
 import json
 import os
 
@@ -119,10 +115,10 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
 
     poses[:, :, 1:3] *= -1
     # scale
-    pose_radius_scale = 0.4
+    pose_radius_scale = 0.6
     poses[:, :, 3] *= pose_radius_scale
     # offset
-    poses[:, :, 3] += np.array([[0,0,1.0]])
+    poses[:, :, 3] += np.array([[0,0,1.5]])
 
     if split == 'train':
         video_list = video_list[1:]
@@ -278,7 +274,10 @@ class SubjectLoader(torch.utils.data.Dataset):
                 color_bkgd = torch.zeros(3, device=self.images.device)
         else:
             # just use white during inference
-            color_bkgd = torch.ones(3, device=self.images.device)
+            if self.color_bkgd_aug == "white":
+                color_bkgd = torch.ones(3, device=self.images.device)
+            elif self.color_bkgd_aug == "black":
+                color_bkgd = torch.zeros(3, device=self.images.device)
 
         return {
             "pixels": pixels,  # [n_rays, 3] or [h, w, 3]

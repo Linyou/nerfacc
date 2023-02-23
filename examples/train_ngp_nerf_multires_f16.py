@@ -177,17 +177,17 @@ if args.gui_only:
 
 
 # setup visualizer to inspect camera and aabb
-# vis = nerfvis.Scene("nerf")
+vis = nerfvis.Scene("nerf")
 
-# vis.add_camera_frustum(
-#     "train_camera",
-#     focal_length=train_dataset.K[0, 0].item(),
-#     image_width=train_dataset.images.shape[2],
-#     image_height=train_dataset.images.shape[1],
-#     z=0.1,
-#     r=train_dataset.camtoworlds[:, :3, :3],
-#     t=train_dataset.camtoworlds[:, :3, -1],
-# )
+vis.add_camera_frustum(
+    "train_camera",
+    focal_length=train_dataset.K[0, 0].item(),
+    image_width=train_dataset.images.shape[2],
+    image_height=train_dataset.images.shape[1],
+    z=0.1,
+    r=train_dataset.camtoworlds[:, :3, :3],
+    t=train_dataset.camtoworlds[:, :3, -1],
+)
 
 # occ_non_vis = occupancy_grid.get_non_visiable()
 # for level, occ_i in enumerate(occ_non_vis):
@@ -199,67 +199,95 @@ if args.gui_only:
 #         point_size=2**(level),  
 #     )
 
-# p1 = aabb[:3].cpu().numpy()
-# p2 = aabb[3:].cpu().numpy()
-# verts, segs = [
-#     [p1[0], p1[1], p1[2]],
-#     [p1[0], p1[1], p2[2]],
-#     [p1[0], p2[1], p2[2]],
-#     [p1[0], p2[1], p1[2]],
-#     [p2[0], p1[1], p1[2]],
-#     [p2[0], p1[1], p2[2]],
-#     [p2[0], p2[1], p2[2]],
-#     [p2[0], p2[1], p1[2]],
-# ], [
-#     [0, 1],
-#     [1, 2],
-#     [2, 3],
-#     [3, 0],
-#     [4, 5],
-#     [5, 6],
-#     [6, 7],
-#     [7, 4],
-#     [0, 4],
-#     [1, 5],
-#     [2, 6],
-#     [3, 7],
-# ]
-# vis.add_lines(
-#     "aabb",
-#     np.array(verts).astype(dtype=np.float32),
-#     segs=np.array(segs),
-# )
+p1 = aabb[:3].cpu().numpy()
+p2 = aabb[3:].cpu().numpy()
+verts, segs = [
+    [p1[0], p1[1], p1[2]],
+    [p1[0], p1[1], p2[2]],
+    [p1[0], p2[1], p2[2]],
+    [p1[0], p2[1], p1[2]],
+    [p2[0], p1[1], p1[2]],
+    [p2[0], p1[1], p2[2]],
+    [p2[0], p2[1], p2[2]],
+    [p2[0], p2[1], p1[2]],
+], [
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0],
+    [4, 5],
+    [5, 6],
+    [6, 7],
+    [7, 4],
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7],
+]
+vis.add_lines(
+    "aabb",
+    np.array(verts).astype(dtype=np.float32),
+    segs=np.array(segs),
+)
 
-# p1 = aabb_bkgd[:3].cpu().numpy()
-# p2 = aabb_bkgd[3:].cpu().numpy()
-# verts, segs = [
-#     [p1[0], p1[1], p1[2]],
-#     [p1[0], p1[1], p2[2]],
-#     [p1[0], p2[1], p2[2]],
-#     [p1[0], p2[1], p1[2]],
-#     [p2[0], p1[1], p1[2]],
-#     [p2[0], p1[1], p2[2]],
-#     [p2[0], p2[1], p2[2]],
-#     [p2[0], p2[1], p1[2]],
-# ], [
-#     [0, 1],
-#     [1, 2],
-#     [2, 3],
-#     [3, 0],
-#     [4, 5],
-#     [5, 6],
-#     [6, 7],
-#     [7, 4],
-#     [0, 4],
-#     [1, 5],
-#     [2, 6],
-#     [3, 7],
-# ]
-# vis.add_lines(
-#     "aabb_bkgd",
-#     np.array(verts).astype(dtype=np.float32),
-#     segs=np.array(segs),
+p1 = aabb_bkgd[:3].cpu().numpy()
+p2 = aabb_bkgd[3:].cpu().numpy()
+verts, segs = [
+    [p1[0], p1[1], p1[2]],
+    [p1[0], p1[1], p2[2]],
+    [p1[0], p2[1], p2[2]],
+    [p1[0], p2[1], p1[2]],
+    [p2[0], p1[1], p1[2]],
+    [p2[0], p1[1], p2[2]],
+    [p2[0], p2[1], p2[2]],
+    [p2[0], p2[1], p1[2]],
+], [
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0],
+    [4, 5],
+    [5, 6],
+    [6, 7],
+    [7, 4],
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7],
+]
+vis.add_lines(
+    "aabb_bkgd",
+    np.array(verts).astype(dtype=np.float32),
+    segs=np.array(segs),
+)
+# radiance_field.eval()
+# def nerfvis_eval_fn(x, dirs):
+#     density, embedding = radiance_field.query_density(
+#         x, return_feat=True
+#     )
+#     print("dir shape: ", dirs.shape)
+#     embedding = embedding.expand(-1, dirs.shape[1], -1)
+#     print("embedding shape: ", embedding.shape)
+#     dirs = dirs.expand(embedding.shape[0], -1, -1)
+#     print("expand dir shape: ", dirs.shape)
+#     rgb = radiance_field._query_rgb(
+#         dirs, embedding=embedding, apply_act=False
+#     )
+#     print("rgb shape: ", rgb.shape)
+#     print("density shape: ", density.shape)
+#     return rgb, density
+
+# vis.remove("nerf")
+# vis.add_nerf(
+#     name="nerf",
+#     eval_fn=nerfvis_eval_fn,
+#     center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
+#     radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
+#     use_dirs=True,
+#     reso=128,
+#     sigma_thresh=1.0,
 # )
+# vis.display(port=8889, serve_nonblocking=True)
 
 # vis.display(port=8889, serve_nonblocking=True)
 
@@ -405,38 +433,38 @@ while step < (max_steps + 1):
 
                 # if step != max_steps:
 
-            # occ_non_vis = occupancy_grid.get_non_visiable()
-            # for level, occ_i in enumerate(occ_non_vis):
-            #     occ_i = occ_i.cpu().numpy()
-            #     print(occ_i.shape)
-            #     vis.add_points(
-            #         f"occ_{level}",
-            #         occ_i,
-            #         point_size=2**(5 - level),  
-            #     )
+            occ_non_vis = occupancy_grid.get_non_visiable()
+            for level, occ_i in enumerate(occ_non_vis):
+                occ_i = occ_i.cpu().numpy()
+                print(occ_i.shape)
+                vis.add_points(
+                    f"occ_{level}",
+                    occ_i,
+                    point_size=2**(5 - level),  
+                )
 
-            # def nerfvis_eval_fn(x, dirs):
-            #     density, embedding = radiance_field.query_density(
-            #         x, return_feat=True
-            #     )
-            #     embedding = embedding.expand(-1, dirs.shape[1], -1)
-            #     dirs = dirs.expand(embedding.shape[0], -1, -1)
-            #     rgb = radiance_field._query_rgb(
-            #         dirs, embedding=embedding, apply_act=False
-            #     )
-            #     return rgb, density
+            def nerfvis_eval_fn(x, dirs):
+                density, embedding = radiance_field.query_density(
+                    x, return_feat=True
+                )
+                embedding = embedding.expand(-1, dirs.shape[1], -1)
+                dirs = dirs.expand(embedding.shape[0], -1, -1)
+                rgb = radiance_field._query_rgb(
+                    dirs, embedding=embedding, apply_act=False
+                )
+                return rgb, density
 
-            # vis.remove("nerf")
-            # vis.add_nerf(
-            #     name="nerf",
-            #     eval_fn=nerfvis_eval_fn,
-            #     center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
-            #     radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
-            #     use_dirs=True,
-            #     reso=128,
-            #     sigma_thresh=1.0,
-            # )
-            # vis.display(port=8889, serve_nonblocking=True)
+            vis.remove("nerf")
+            vis.add_nerf(
+                name="nerf",
+                eval_fn=nerfvis_eval_fn,
+                center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
+                radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
+                use_dirs=True,
+                reso=128,
+                sigma_thresh=1.0,
+            )
+            vis.display(port=8889, serve_nonblocking=True)
 
             imageio.imwrite(
                 "rgb_test.png",
