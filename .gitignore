@@ -123,3 +123,6 @@ outputs/
 *.png
 
 nerfvis_scenes/
+
+*.pth
+*.ini
