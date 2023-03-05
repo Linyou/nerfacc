@@ -10,6 +10,7 @@ from .intersection import ray_aabb_intersect
 from .vol_rendering import render_visibility, render_visibility_prefix
 from torch.cuda.amp import custom_fwd
 
+import pdb
 class RayMarcher(torch.autograd.Function):
 
     @staticmethod
@@ -277,7 +278,6 @@ def ray_marching(
             t_starts[masks],
             t_ends[masks],
         )
-
     return ray_indices, t_starts, t_ends
     
 

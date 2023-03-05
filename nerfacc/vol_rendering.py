@@ -127,7 +127,7 @@ def rendering(
     if render_bkgd is not None:
         colors = colors + render_bkgd * (1.0 - opacities)
 
-    return colors, opacities, depths, weights
+    return colors, opacities, depths, weights, rgbs
 
 def rendering_test(
     mask: torch.Tensor,

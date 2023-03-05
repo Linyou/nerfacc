@@ -146,6 +146,7 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
             sizeofimage = len(vids)-1 # 0~n-1
             progress.set_description_str(f'{scene}-{v_name}')
             progress.reset(total=len(vids))
+            # images_per_video = []
             for j, im in enumerate(vids):
                 progress.update()
                 if j % 1 == 0:
@@ -159,6 +160,9 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
                     # timestamps.append(0.)
                     poses_list.append(pose)
                     # bds_list.append(bd)
+
+            # images_per_video = np.stack(images_per_video, axis=0)
+            # images.append(images_per_video)
             progress.refresh()
 
     images = torch.from_numpy(np.stack(images, axis=0))

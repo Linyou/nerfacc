@@ -35,7 +35,10 @@ import warnings; warnings.filterwarnings("ignore")
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def get_rays(K, pose, width, height, opengl=True):
+def get_rays(K, pose, width, height, opengl=True, hyber=False):
+
+    if hyber:
+        K = K[0]
 
     x, y = torch.meshgrid(
         torch.arange(width, device=device, dtype=torch.float16),
@@ -150,7 +153,7 @@ class OrbitCamera:
 
 
 class NGPGUI:
-    def __init__(self, radius=1.5, render_kwargs=None, use_time=False, opengl=True):
+    def __init__(self, radius=1.5, render_kwargs=None, use_time=False, opengl=True, hyber=False):
 
         device = "cuda:0"
 
@@ -172,6 +175,7 @@ class NGPGUI:
         self.render_bkgd = render_kwargs['render_bkgd']
         self.args_aabb = render_kwargs['args_aabb']
 
+        self.get_rays_func = get_rays
 
 
         self.radiance_field.eval()
@@ -194,13 +198,14 @@ class NGPGUI:
         self.max_samples = 100
 
         self.opengl = opengl
+        self.hyber = hyber
 
     @torch.no_grad()
     def render_cam(self, cam):
         t = time.time()
         # print(cam.pose)
         with torch.autocast(device_type='cuda', dtype=torch.float16):
-            rays = get_rays(cam.K, torch.cuda.FloatTensor(cam.pose), self.W, self.H, opengl=self.opengl)
+            rays = self.get_rays_func(cam.K, torch.cuda.FloatTensor(cam.pose), self.W, self.H, opengl=self.opengl, hyber=self.hyber)
             # ngp test rendering v3 (rays level)
             rgb, _, depth, n_rendering_samples = render_image_test_v3(
                 self.max_samples,

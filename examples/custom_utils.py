@@ -367,7 +367,7 @@ def custom_rendering(
 
     # Query sigma/alpha and color with gradients
     if rgb_sigma_fn is not None:
-        rgbs, sigmas, extra = rgb_sigma_fn(t_starts, t_ends, ray_indices.long())
+        rgbs, sigmas, extra = rgb_sigma_fn(t_starts, t_ends, ray_indices)
         assert rgbs.shape[-1] == 3, "rgbs must have 3 channels, got {}".format(
             rgbs.shape
         )
@@ -375,13 +375,12 @@ def custom_rendering(
             sigmas.shape == t_starts.shape
         ), "sigmas must have shape of (N, 1)! Got {}".format(sigmas.shape)
         # Rendering: compute weights.
-        weights, trans = render_weight_from_density(
+        weights = render_weight_from_density(
             t_starts,
             t_ends,
             sigmas,
             ray_indices=ray_indices,
-            n_rays=n_rays,
-            return_trans=True
+            n_rays=n_rays
         )
         # trans = render_transmittance_from_density(
         #     t_starts,
@@ -391,7 +390,7 @@ def custom_rendering(
         #     n_rays=n_rays,
         # )
     elif rgb_alpha_fn is not None:
-        rgbs, alphas = rgb_alpha_fn(t_starts, t_ends, ray_indices.long())
+        rgbs, alphas = rgb_alpha_fn(t_starts, t_ends, ray_indices)
         assert rgbs.shape[-1] == 3, "rgbs must have 3 channels, got {}".format(
             rgbs.shape
         )
@@ -449,7 +448,7 @@ def custom_rendering(
                 ray_indices,
                 values=feat_loss,
                 n_rays=n_rays,
-                weights=weights,
+                # weights=weights,
             )
         )
     else:
@@ -482,7 +481,7 @@ def custom_rendering(
     if render_bkgd is not None:
         colors = colors + render_bkgd * (1.0 - opacities)
 
-    return colors, opacities, depths, selector, weights, extra_reduce
+    return colors, opacities, depths, selector, weights, extra_reduce, rgbs
 
 
 def custom_render_image(
@@ -503,6 +502,7 @@ def custom_render_image(
     # only useful for dnerf
     timestamps: Optional[torch.Tensor] = None,
     idx: Optional[torch.Tensor] = None,
+    use_sigma_fn: bool = True,
 ):
     """Render the pixels of an image."""
     rays_shape = rays.origins.shape
@@ -515,23 +515,25 @@ def custom_render_image(
     else:
         num_rays, _ = rays_shape
 
-    def sigma_fn(t_starts, t_ends, ray_indices):
-        ray_indices = ray_indices.long()
-        t_origins = chunk_rays.origins[ray_indices]
-        t_dirs = chunk_rays.viewdirs[ray_indices]
-        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
-        if timestamps is not None:
-            # dnerf
-            t = (
-                timestamps[ray_indices]
-                if radiance_field.training
-                else timestamps.expand_as(positions[:, :1])
-            )
-            return radiance_field.query_density(positions, t)
-        return radiance_field.query_density(positions)
+    if use_sigma_fn:
+        def sigma_fn(t_starts, t_ends, ray_indices):
+            t_origins = chunk_rays.origins[ray_indices]
+            t_dirs = chunk_rays.viewdirs[ray_indices]
+            positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+            if timestamps is not None:
+                # dnerf
+                t = (
+                    timestamps[ray_indices]
+                    if radiance_field.training
+                    else timestamps.expand_as(positions[:, :1])
+                )
+                return radiance_field.query_density(positions, t)
+            return radiance_field.query_density(positions)
+    
+    else:
+        sigma_fn = None
 
     def rgb_sigma_fn(t_starts, t_ends, ray_indices):
-        ray_indices = ray_indices.long()
         t_origins = chunk_rays.origins[ray_indices]
         t_dirs = chunk_rays.viewdirs[ray_indices]
         positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
@@ -577,7 +579,7 @@ def custom_render_image(
             alpha_thre=alpha_thre,
         )
         # print(len(t_starts))
-        rgb, opacity, depth, final_move, weight, extra = custom_rendering(
+        rgb, opacity, depth, final_move, weight, extra, rgbs = custom_rendering(
             t_starts,
             t_ends,
             ray_indices,
@@ -588,7 +590,7 @@ def custom_render_image(
         chunk_results = [rgb, opacity, depth, final_move, len(t_starts)]
         results.append(chunk_results)
         extra_results.append(extra)
-        extra_info.append((weight, t_starts, t_ends, ray_indices, pack_info(ray_indices, chunk_rays.origins.shape[0])))
+        extra_info.append((weight, t_starts, t_ends, ray_indices, rgbs))
     colors, opacities, depths, final_moves, n_rendering_samples = [
         torch.cat(r, dim=0) if isinstance(r[0], torch.Tensor) else r
         for r in zip(*results)

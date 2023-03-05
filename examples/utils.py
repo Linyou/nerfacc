@@ -9,6 +9,7 @@ from typing import Optional
 import numpy as np
 import torch
 from datasets.utils import Rays, namedtuple_map
+import pdb
 
 from nerfacc import (
     OccupancyGrid, ray_marching, 
@@ -40,6 +41,7 @@ def render_image(
     test_chunk_size: int = 8192,
     # only useful for dnerf
     timestamps: Optional[torch.Tensor] = None,
+    use_sigma_fn: bool = True,
 ):
     """Render the pixels of an image."""
     rays_shape = rays.origins.shape
@@ -52,19 +54,22 @@ def render_image(
     else:
         num_rays, _ = rays_shape
 
-    def sigma_fn(t_starts, t_ends, ray_indices):
-        t_origins = chunk_rays.origins[ray_indices]
-        t_dirs = chunk_rays.viewdirs[ray_indices]
-        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
-        if timestamps is not None:
-            # dnerf
-            t = (
-                timestamps[ray_indices]
-                if radiance_field.training
-                else timestamps.expand_as(positions[:, :1])
-            )
-            return radiance_field.query_density(positions, t)
-        return radiance_field.query_density(positions)
+    if use_sigma_fn:
+        def sigma_fn(t_starts, t_ends, ray_indices):
+            t_origins = chunk_rays.origins[ray_indices]
+            t_dirs = chunk_rays.viewdirs[ray_indices]
+            positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+            if timestamps is not None:
+                # dnerf
+                t = (
+                    timestamps[ray_indices]
+                    if radiance_field.training
+                    else timestamps.expand_as(positions[:, :1])
+                )
+                return radiance_field.query_density(positions, t)
+            return radiance_field.query_density(positions)
+    else:
+        sigma_fn = None
 
     def rgb_sigma_fn(t_starts, t_ends, ray_indices):
         t_origins = chunk_rays.origins[ray_indices]
@@ -102,7 +107,7 @@ def render_image(
             cone_angle=cone_angle,
             alpha_thre=alpha_thre,
         )
-        rgb, opacity, depth, weight = rendering(
+        rgb, opacity, depth, weight, rgbs = rendering(
             t_starts,
             t_ends,
             ray_indices,
@@ -113,7 +118,7 @@ def render_image(
         chunk_results = [rgb, opacity, depth, len(t_starts)]
         results.append(chunk_results)
         # packed_info = pack_info(ray_indices, n_rays=len(chunk_rays.origins))
-        extra_info.append((weight, t_starts, t_ends, ray_indices))
+        extra_info.append((weight, t_starts, t_ends, ray_indices, rgbs))
     colors, opacities, depths, n_rendering_samples = [
         torch.cat(r, dim=0) if isinstance(r[0], torch.Tensor) else r
         for r in zip(*results)

@@ -11,6 +11,8 @@ from PIL import Image
 from .utils import Rays
 import torch.nn.functional as F
 from typing import Tuple
+from tqdm import tqdm
+import pdb
 
 
 def _compute_residual_and_jacobian(
@@ -51,35 +53,33 @@ def _compute_residual_and_jacobian(
 def _radial_and_tangential_undistort(
     xd: torch.Tensor,
     yd: torch.Tensor,
-    k1: float = 0,
-    k2: float = 0,
-    k3: float = 0,
-    p1: float = 0,
-    p2: float = 0,
+    distortion: torch.Tensor,
     eps: float = 1e-9,
     max_iterations=10) -> Tuple[torch.Tensor, torch.Tensor]:
-  """Computes undistorted (x, y) from (xd, yd)."""
-  # Initialize from the distorted point.
-  x = xd.clone()
-  y = yd.clone()
+    """Computes undistorted (x, y) from (xd, yd)."""
+    # Initialize from the distorted point.
+    x = xd.clone()
+    y = yd.clone()
 
-  for _ in range(max_iterations):
-    fx, fy, fx_x, fx_y, fy_x, fy_y = _compute_residual_and_jacobian(
-        x=x, y=y, xd=xd, yd=yd, k1=k1, k2=k2, k3=k3, p1=p1, p2=p2)
-    denominator = fy_x * fx_y - fx_x * fy_y
-    x_numerator = fx * fy_y - fy * fx_y
-    y_numerator = fy * fx_x - fx * fy_x
-    step_x = torch.where(
-        torch.abs(denominator) > eps, x_numerator / denominator,
-        torch.zeros_like(denominator))
-    step_y = torch.where(
-        torch.abs(denominator) > eps, y_numerator / denominator,
-        torch.zeros_like(denominator))
+    k1, k2, k3, p1, p2 = distortion
+
+    for _ in range(max_iterations):
+        fx, fy, fx_x, fx_y, fy_x, fy_y = _compute_residual_and_jacobian(
+            x=x, y=y, xd=xd, yd=yd, k1=k1, k2=k2, k3=k3, p1=p1, p2=p2)
+        denominator = fy_x * fx_y - fx_x * fy_y
+        x_numerator = fx * fy_y - fy * fx_y
+        y_numerator = fy * fx_x - fx * fy_x
+        step_x = torch.where(
+            torch.abs(denominator) > eps, x_numerator / denominator,
+            torch.zeros_like(denominator))
+        step_y = torch.where(
+            torch.abs(denominator) > eps, y_numerator / denominator,
+            torch.zeros_like(denominator))
 
     x = x + step_x
     y = y + step_y
 
-  return x, y
+    return x, y
 
 class Load_hyper_data():
     def __init__(self, 
@@ -196,18 +196,22 @@ def _load_data_from_json(
         add_cam=add_cam
     )
 
-    fx = hyper_data.all_cam_params[0].scale_factor_x.item()
-    fy = hyper_data.all_cam_params[0].scale_factor_y.item()
+    # fx = hyper_data.all_cam_params[0].scale_factor_x.item()
+    # fy = hyper_data.all_cam_params[0].scale_factor_y.item()
     h, w = hyper_data.all_cam_params[0].image_shape
 
-    instrinc = (fx, fy, h.item(), w.item())
-    k1, k2, k3 = hyper_data.all_cam_params[0].radial_distortion
-    p1, p2 = hyper_data.all_cam_params[0].tangential_distortion
-    extra_info = (k1, k2, k3, p1, p2)
+    img_hw = (h.item(), w.item())
+    # k1, k2, k3 = hyper_data.all_cam_params[0].radial_distortion
+    # p1, p2 = hyper_data.all_cam_params[0].tangential_distortion
+    # extra_info = (k1, k2, k3, p1, p2)
 
     images = []
     poses = []
     timestamps = []
+    focals = []
+    distortions = []
+
+    cam_data = []
 
     if split == 'train':
         iter_idx = hyper_data.i_train
@@ -227,8 +231,21 @@ def _load_data_from_json(
         c2w = np.concatenate([R, T], axis=-1)
         poses.append(c2w)
 
+        # extra info
+        fx = hyper_data.all_cam_params[i].scale_factor_x.item()
+        fy = hyper_data.all_cam_params[i].scale_factor_y.item()
+        focals.append(np.array([fx, fy]))
+
+        distortions.append(
+            np.concatenate([
+                hyper_data.all_cam_params[i].radial_distortion,
+                hyper_data.all_cam_params[i].tangential_distortion
+            ])
+        )
+
         # load timestamp
         timestamps.append(hyper_data.all_time[i])
+        cam_data.append(hyper_data.all_cam_params[i])
 
     images = torch.from_numpy(np.stack(images, axis=0))
     poses = np.array(poses).astype(np.float32)
@@ -239,13 +256,16 @@ def _load_data_from_json(
     # poses[:, 0, 3] *= -1
     # poses[:, 2, 3] *= -1
     # scale
-    pose_radius_scale = 1.5
+    pose_radius_scale = 1.
     poses[:, :, 3] *= pose_radius_scale
     # # offset
     poses[:, :, 3] += np.array([[0, 0 ,0.0]])
     timestamps = np.array(timestamps).astype(np.float32)
 
-    return images, poses, timestamps, instrinc, extra_info
+    focals = np.array(focals).astype(np.float32)
+    distortions = np.array(distortions).astype(np.float32)
+
+    return images, poses, timestamps, focals, distortions, img_hw, cam_data
             
 
 
@@ -292,6 +312,7 @@ class SubjectLoader(torch.utils.data.Dataset):
         batch_over_images: bool = True,
         factor: int = 1,
         read_image=True,
+        add_cam=False,
         device: str = "cpu",
     ):
         super().__init__()
@@ -314,8 +335,10 @@ class SubjectLoader(torch.utils.data.Dataset):
             self.images,
             self.poses,
             self.timestamps,
-            instrinc,
-            extra_info
+            self.focals,
+            self.distortions,
+            img_hw,
+            self.hyper_data
         ) = _load_data_from_json(
             os.path.join(
                 root_fp, 
@@ -324,17 +347,21 @@ class SubjectLoader(torch.utils.data.Dataset):
             ), 
             ratio=1/factor, 
             split=split, 
-            read_image=read_image
+            read_image=read_image,
+            add_cam=add_cam
         )
-        self.k1, self.k2, self.k3, self.p1, self.p2 = extra_info
-        self.focal_x, self.focal_y, self.HEIGHT, self.WIDTH = instrinc
+        self.HEIGHT, self.WIDTH = img_hw
 
         # self.images = torch.from_numpy(self.images).to(torch.uint8)
         self.camtoworlds = torch.from_numpy(self.poses[:, :4, :4]).to(torch.float32)
         self.timestamps = torch.from_numpy(self.timestamps).to(torch.float32)[
             :, None
         ]
+        # self.focals = torch.from_numpy(self.focals).to(torch.float32)
+        # self.distortions = torch.from_numpy(self.distortions).to(torch.float32)
         
+        self.principal_point_x = self.WIDTH / 2.
+        self.principal_point_y = self.HEIGHT / 2.
 
         print("showing a pose: ")
         print(self.poses[0].astype(np.float16))
@@ -344,14 +371,24 @@ class SubjectLoader(torch.utils.data.Dataset):
         # print("focal_y: ", self.focal_y)
         # print("height: ", self.HEIGHT)
         # print("width: ", self.WIDTH)
-        self.K = torch.tensor(
-            [
-                [self.focal_x, 0, self.WIDTH / 2.0],
-                [0, self.focal_y, self.HEIGHT / 2.0],
-                [0, 0, 1],
-            ],
-            dtype=torch.float32,
-        )  # (3, 3)
+        Ks = []
+        for f in tqdm(self.focals):
+            temp_K = torch.eye(3)
+            temp_K[0, 0] = f[0].item()
+            temp_K[1, 1] = f[1].item()
+            temp_K[0, 2] = self.principal_point_x
+            temp_K[1, 2] = self.principal_point_y
+            Ks.append(temp_K)
+
+        self.K = torch.stack(Ks)
+        # self.K = torch.tensor(
+        #     [
+        #         [self.focal_x, 0, self.principal_point_x],
+        #         [0, self.focal_y, self.principal_point_y],
+        #         [0, 0, 1],
+        #     ],
+        #     dtype=torch.float32,
+        # )  # (N, 3, 3)
         if read_image:
             assert self.images.shape[1:3] == (self.HEIGHT, self.WIDTH)
 
@@ -407,55 +444,77 @@ class SubjectLoader(torch.utils.data.Dataset):
         num_rays = self.num_rays
 
         if self.training:
-            if self.batch_over_images:
-                image_id = torch.randint(
-                    0,
-                    len(self.images),
-                    size=(num_rays,),
-                    device=self.images.device,
-                )
-            else:
-                image_id = [index]
+            # if self.batch_over_images:
+            #     image_id = torch.randint(
+            #         0,
+            #         len(self.images),
+            #         size=(num_rays,),
+            #         device=self.images.device,
+            #     )
+            # else:
+            image_id = torch.randint(
+                0,
+                len(self.images),
+                size=(1,),
+                device=self.images.device,
+            ).expand(num_rays).clone()
+            # image_id = torch.tensor(
+            #     [index], device=self.images.device
+            # ).expand(num_rays).clone()
+                # image_id = [index]
+            # x = torch.randint(
+            #     0, self.WIDTH, size=(num_rays,), device=self.images.device
+            # )
+            # y = torch.randint(
+            #     0, self.HEIGHT, size=(num_rays,), device=self.images.device
+            # )
             x = torch.randint(
-                0, self.WIDTH, size=(num_rays,), device=self.images.device
+                0, self.WIDTH, size=(num_rays,)
             )
             y = torch.randint(
-                0, self.HEIGHT, size=(num_rays,), device=self.images.device
+                0, self.HEIGHT, size=(num_rays,)
             )
         else:
             image_id = [index]
             x, y = torch.meshgrid(
-                torch.arange(self.WIDTH, device=self.images.device),
-                torch.arange(self.HEIGHT, device=self.images.device),
+                torch.arange(self.WIDTH),
+                torch.arange(self.HEIGHT),
                 indexing="xy",
             )
             x = x.flatten()
             y = y.flatten()
 
+
         # generate rays
         rgb = self.images[image_id, y, x] / 255.0  # (num_rays, 3)
-        c2w = self.camtoworlds[image_id]  # (num_rays, 3, 4)
-        x = (x - self.K[0, 2] + 0.5) / self.K[0, 0]
-        y = (y - self.K[1, 2] + 0.5) / self.K[1, 1]
-        x, y = _radial_and_tangential_undistort(
-            x, y,
-            self.k1, self.k2, self.k3, self.p1, self.p2
-        )
-        camera_dirs = F.pad(
-            torch.stack(
-                [
-                    x,
-                    y * (-1.0 if self.OPENGL_CAMERA else 1.0),
-                ],
-                dim=-1,
-            ),
-            (0, 1),
-            value=(-1.0 if self.OPENGL_CAMERA else 1.0),
-        )  # [num_rays, 3]
+        # c2w = self.camtoworlds[image_id]  # (num_rays, 3, 4)
+        # x = (x - self.principal_point_x + 0.5) / self.focals[image_id[0], 0] 
+        # y = (y - self.principal_point_y + 0.5) / self.focals[image_id[0], 1] 
+        # x, y = _radial_and_tangential_undistort(
+        #     x, y,
+        #     self.distortions[image_id[0]],
+        # )
+        # # print('distortions: ', self.distortions[image_id[0]])
+        # camera_dirs = F.pad(
+        #     torch.stack(
+        #         [
+        #             x,
+        #             y * (-1.0 if self.OPENGL_CAMERA else 1.0),
+        #         ],
+        #         dim=-1,
+        #     ),
+        #     (0, 1),
+        #     value=(-1.0 if self.OPENGL_CAMERA else 1.0),
+        # )  # [num_rays, 3]
 
-        # [n_cams, height, width, 3]
-        directions = (camera_dirs[:, None, :] * c2w[:, :3, :3]).sum(dim=-1)
-        origins = torch.broadcast_to(c2w[:, :3, -1], directions.shape)
+        # # [n_cams, height, width, 3]
+        # directions = (camera_dirs[:, None, :] * c2w[:, :3, :3]).sum(dim=-1)
+        # origins = torch.broadcast_to(c2w[:, :3, -1], directions.shape)
+        pix = np.stack([x, y], axis=-1) + 0.5
+        camera = self.hyper_data[image_id[0]]
+        directions = torch.tensor(camera.pixels_to_rays(pix.astype(np.float32))).float().view([-1,3])
+        origins = torch.tensor(camera.position[None, :]).float().expand_as(directions)
+
         viewdirs = directions / torch.linalg.norm(
             directions, dim=-1, keepdims=True
         )
@@ -471,7 +530,7 @@ class SubjectLoader(torch.utils.data.Dataset):
             directions = torch.reshape(directions, (self.HEIGHT, self.WIDTH, 3))
             rgb = torch.reshape(rgb, (self.HEIGHT, self.WIDTH, 3))
 
-        rays = Rays(origins=origins, viewdirs=viewdirs)
+        rays = Rays(origins=origins, viewdirs=directions)
         timestamps = self.timestamps[image_id]
 
         return {
@@ -480,3 +539,4 @@ class SubjectLoader(torch.utils.data.Dataset):
             "timestamps": timestamps,  # [num_rays, 1]
             "idx": image_id,
         }
+    
