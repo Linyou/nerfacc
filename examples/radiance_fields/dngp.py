@@ -342,7 +342,7 @@ class NGPradianceField(torch.nn.Module):
             # fine_move = torch.tanh(offsets[:, 3:])*self.MOVING_STEP
 
         else:
-            grid_move = offsets*0.001
+            grid_move = offsets*self.MOVING_STEP
             fine_move = 0
 
         move = grid_move + fine_move

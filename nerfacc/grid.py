@@ -308,7 +308,6 @@ class OccupancyGrid(Grid):
         w2c_R = rearrange(poses[:, :3, :3], 'n a b -> n b a') # (N_cams, 3, 3)
         w2c_T = -w2c_R@poses[:, :3, 3:] # (N_cams, 3, 1)
         cells = self._get_all_cells()
-        print("grid before mask: ", self.occs[self.occs>=0].shape)
         for lvl in range(self.levels):
             indices = cells[lvl]
             coords = self.grid_coords[indices]
@@ -341,7 +340,6 @@ class OccupancyGrid(Grid):
                 self.occs[cell_ids_base+indices_chunk] = \
                     torch.where(valid_mask, 0., -1.)
 
-        print("grid after mask: ", self.occs[self.occs>=0].shape)
 
 
     @torch.no_grad()

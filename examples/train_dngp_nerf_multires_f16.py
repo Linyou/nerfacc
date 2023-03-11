@@ -68,6 +68,9 @@ parser.add_argument(
         "cook_spinach", 
         "cut_roasted_beef", 
         "flame_salmon_1",
+        "flame_salmon_2",
+        "flame_salmon_3",
+        "flame_salmon_4",
         "flame_steak", 
         "sear_steak",
         # hyperNerf
@@ -242,6 +245,7 @@ aabb_bkgd = enlarge_aabb(aabb, aabb_scale)
 
 
 # setup the dataset
+add_cam = False
 if args.dataset == "hypernerf":
     from datasets.hypernerf import SubjectLoader
     data_root_fp = "/home/loyot/workspace/Datasets/NeRF/HyberNeRF/"
@@ -249,10 +253,12 @@ if args.dataset == "hypernerf":
     extra_kwargs = {
         "add_cam": add_cam,
     }
+    dst_hash_resolution = 4096
 elif args.dataset == "3dnerf":
     from datasets.dnerf_3d_video import SubjectLoader
     data_root_fp = "/home/loyot/workspace/Datasets/NeRF/3d_vedio_datasets/"
     extra_kwargs = {}
+    dst_hash_resolution = 4096*2
 
 train_dataset = SubjectLoader(
     subject_id=args.scene,
@@ -262,7 +268,7 @@ train_dataset = SubjectLoader(
     color_bkgd_aug="black",
     factor=args.data_factor,
     device=device,
-    *extra_kwargs,
+    **extra_kwargs,
 )
 train_dataloader = torch.utils.data.DataLoader(
     train_dataset,
@@ -279,7 +285,7 @@ test_dataset = SubjectLoader(
     color_bkgd_aug="black",
     factor=args.data_factor,
     device=device,
-    *extra_kwargs,
+    **extra_kwargs,
 )
 test_dataloader = torch.utils.data.DataLoader(
     test_dataset,
@@ -297,7 +303,7 @@ radiance_field = DNGPradianceField(
     n_levels=16,
     n_features_per_level=2,
     base_resolution=16,
-    dst_resolution=4096,
+    dst_resolution=dst_hash_resolution,
     moving_step=args.moving_step,
     # moving_step=args.moving_step,
     use_dive_offsets=args.use_dive_offsets,
@@ -337,27 +343,34 @@ camera_fuse = torch.cat([
     train_dataset.camtoworlds,
     # test_dataset.camtoworlds,
 ])
-# occupancy_grid.mark_invisible_cells(
-#     train_dataset.K.to(device), 
-#     camera_fuse.to(device), 
-#     [train_dataset.width, train_dataset.height],
-#     near_plane,
-# )
-# if add_cam:
-#     for i in range(train_dataset.K.shape[0]):
-#         print(train_dataset.K[i])
-#         occupancy_grid.mark_invisible_cells(
-#             train_dataset.K[i].to(device), 
-#             camera_fuse[i:i+1].to(device), 
-#             [train_dataset.width, train_dataset.height],
-#             near_plane,
-#         )
+print("grid before mask: ", occupancy_grid.occs[occupancy_grid.occs>=0].shape)
+if add_cam:
+    # for i in range(train_dataset.K.shape[0]):
+    #     occupancy_grid.mark_invisible_cells(
+    #         train_dataset.K[i].to(device), 
+    #         camera_fuse[i:i+1].to(device), 
+    #         [train_dataset.width, train_dataset.height],
+    #         near_plane,
+    #     )
+    occupancy_grid.mark_invisible_cells(
+        train_dataset.K[30].to(device), 
+        camera_fuse.to(device), 
+        [train_dataset.width, train_dataset.height],
+        near_plane,
+    )
+else:
+    occupancy_grid.mark_invisible_cells(
+        train_dataset.K.to(device), 
+        camera_fuse.to(device), 
+        [train_dataset.width, train_dataset.height],
+        near_plane,
+    )
+print("grid after mask: ", occupancy_grid.occs[occupancy_grid.occs>=0].shape)
 
 if args.gui_only:
     state_dict = torch.load(args.load_model)
     radiance_field.load_state_dict(state_dict["radiance_field"])
     occupancy_grid.load_state_dict(state_dict["occupancy_grid"])
-
 
     gui_args = {
         'train_dataset': train_dataset, 
@@ -376,7 +389,11 @@ if args.gui_only:
         'contraction_type': None,
     }
 
-    ngp = NGPGUI(render_kwargs=gui_args, use_time=True, hyber=True)
+    ngp = NGPGUI(
+        render_kwargs=gui_args, 
+        use_time=True, 
+        hyber=True if args.dataset == "hypernerf" else False,
+    )
     render_gui(ngp)
     exit()
 
@@ -670,6 +687,7 @@ for _ in range(10000000):
             msssims = []
             lpips = []
             aabb_bkgd = aabb_bkgd.to(torch.float32)
+            # timer = time.time()
             with torch.no_grad():
                 # for i in tqdm.tqdm(range(len(test_dataset))):
                 #     data = test_dataset[i]
@@ -726,8 +744,12 @@ for _ in range(10000000):
 
                     logger_obj.save_image(rgb, depth, pixels=pixels, step=test_step)
 
-                progress_bar.close()
+                # elapsed_time = time.time() - timer
+                # per_i = elapsed_time/len(test_dataset)
+                # print(f"total training time: {elapsed_time:.2f}, per_image: {per_i:.2f}")
 
+                progress_bar.close()
+            
                     # if step != max_steps:
 
                 if args.vis_nerf:

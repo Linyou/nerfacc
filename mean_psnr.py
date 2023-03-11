@@ -86,37 +86,57 @@ lrs = ['lr_0-003', 'lr_0-01']
 
 lrs = [0.01,]
 # feats of diff feat
-# feats = [
-#     'pf_nopw_l-huber_te',
-#     'pf_pw_l-huber_op',
-#     'pf_nopw_l-huber',
-#     'pf_pw_l-huber_op_te',
-#     'nopf_pw_l-huber_te_ta',
-#     'nopf_nopw_l-huber',
-#     'nopf_pw_l-huber',
-#     'nopf_nopw_l-huber_te_ta',
-#     'pf_nopw_l-huber_op_te_ta',
-#     'pf_pw_l-huber_op_te_ta',
-#     'nopf_pw_l-huber_op',
-#     'pf_pw_l-huber',
-#     'nopf_pw_l-huber_op_te',
-#     'pf_nopw_l-huber_dive_op_te_ta',
-#     'pf_nopw_l-huber_op_te',
-#     'pf_nopw_l-huber_op',
-#     'nopf_pw_l-huber_te',
-#     'pf_pw_l-huber_te',
-#     'pf_nopw_l-huber_te_ta',
-#     'nopf_nopw_l-huber_op_te',
-#     'nopf_pw_l-huber_op_te_ta',
-#     'pf_pw_l-huber_te_ta',
-#     'nopf_nopw_l-huber_op_te_ta',
-#     'nopf_nopw_l-huber_te'
-# ]
+feats = [
+    'pf_nopw_l-huber_te',
+    'pf_pw_l-huber_op',
+    'pf_nopw_l-huber',
+    'pf_pw_l-huber_op_te',
+    'nopf_pw_l-huber_te_ta',
+    'nopf_nopw_l-huber',
+    'nopf_pw_l-huber',
+    'nopf_nopw_l-huber_te_ta',
+    'pf_nopw_l-huber_op_te_ta',
+    'pf_pw_l-huber_op_te_ta',
+    'nopf_pw_l-huber_op',
+    'pf_pw_l-huber',
+    'nopf_pw_l-huber_op_te',
+    # 'pf_nopw_l-huber_dive_op_te_ta',
+    'pf_nopw_l-huber_op_te',
+    'pf_nopw_l-huber_op',
+    'nopf_pw_l-huber_te',
+    'pf_pw_l-huber_te',
+    'pf_nopw_l-huber_te_ta',
+    'nopf_nopw_l-huber_op_te',
+    'nopf_pw_l-huber_op_te_ta',
+    'pf_pw_l-huber_te_ta',
+    'nopf_nopw_l-huber_op_te_ta',
+    'nopf_nopw_l-huber_te'
+]
 
 
 
 # feats of diff dive
-feats = [
+feats += [
+    'hl0_pf_nopw_l-huber_dive64.0_op_te_ta',
+    'hl0_pf_nopw_l-huber_dive128.0_op_te_ta',
+    'hl0_pf_nopw_l-huber_dive256.0_op_te_ta',
+    'hl0_pf_nopw_l-huber_dive512.0_op_te_ta',
+    'hl0_pf_nopw_l-huber_dive1024.0_op_te_ta',
+    'hl0_pf_nopw_l-huber_dive2048.0_op_te_ta',
+    'hl0_pf_nopw_l-huber_dive4096.0_op_te_ta',
+    'hl0_pf_nopw_l-huber_dive8192.0_op_te_ta'
+]
+feats += [
+    'hl1_pf_nopw_l-huber_dive64.0_op_te_ta',
+    'hl1_pf_nopw_l-huber_dive128.0_op_te_ta',
+    'hl1_pf_nopw_l-huber_dive256.0_op_te_ta',
+    'hl1_pf_nopw_l-huber_dive512.0_op_te_ta',
+    'hl1_pf_nopw_l-huber_dive1024.0_op_te_ta',
+    'hl1_pf_nopw_l-huber_dive2048.0_op_te_ta',
+    'hl1_pf_nopw_l-huber_dive4096.0_op_te_ta',
+    'hl1_pf_nopw_l-huber_dive8192.0_op_te_ta'
+]
+feats += [
     'hl2_pf_nopw_l-huber_dive64.0_op_te_ta',
     'hl2_pf_nopw_l-huber_dive128.0_op_te_ta',
     'hl2_pf_nopw_l-huber_dive256.0_op_te_ta',

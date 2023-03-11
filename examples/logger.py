@@ -19,6 +19,9 @@ class Logger(object):
         self.log_file = None
         
         feat_dir = ''
+        
+        if args.use_dive_offsets:
+            feat_dir += 'df'
 
         if args.use_feat_predict:
             feat_dir += 'pf' 

@@ -70,12 +70,21 @@ def similarity_from_cameras(c2w, strict_scaling):
 
 def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=True):
 
+    scene = subject_id
+
+    is_flame_salmon = False
+    if 'flame_salmon' in subject_id:
+        flame_id = int(subject_id.split('_')[-1])-1
+        is_flame_salmon = True
+        subject_id = 'flame_salmon_1'
+
     basedir = os.path.join(root_fp, subject_id)
     
     poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
     # print("poses_arr: ", poses_arr.shape)
     poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
     bds = poses_arr[:, -2:].transpose([1,0])
+
     
     json_file = os.path.join(basedir, f'images_x{factor}_list.json')
     with open(json_file) as jf:
@@ -85,7 +94,7 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
     r_h = json_data['videos'][0]['images'][0]['height']
 
     video_list = json_data['videos']
-    scene = json_data['scene']
+    # scene = json_data['scene']
 
 
     poses[:2, 4, :] = np.array([r_h, r_w]).reshape([2, 1])
@@ -115,16 +124,18 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
 
     poses[:, :, 1:3] *= -1
     # scale
-    pose_radius_scale = 0.6
+    pose_radius_scale = 0.4
     poses[:, :, 3] *= pose_radius_scale
     # offset
     poses[:, :, 3] += np.array([[0,0,1.5]])
 
     if split == 'train':
+        load_every = 1
         video_list = video_list[1:]
         poses = poses[1:]
         bds = bds[1:]
     else:
+        load_every = 10
         video_list = video_list[:1]
         poses = poses[:1]
         bds = bds[:1]
@@ -132,7 +143,7 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
     images = []
     timestamps = []
     poses_list = []
-    bds_list = []
+    bds_list = [] 
     print("loading video:")
     with tqdm(position=0) as progress:
         for i, video in enumerate(video_list):
@@ -142,14 +153,15 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
             # bd = bds[i]
 
             vids = video['images']
+            if is_flame_salmon:
+                vids = vids[flame_id*300:(flame_id+1)*300]
             
             sizeofimage = len(vids)-1 # 0~n-1
             progress.set_description_str(f'{scene}-{v_name}')
             progress.reset(total=len(vids))
-            # images_per_video = []
             for j, im in enumerate(vids):
                 progress.update()
-                if j % 1 == 0:
+                if j % load_every == 0:
                     idx = im['idx']
                     # images.append(np.array(Image.open(im['path'])).astype(np.uint8)[None, ...])
                     if read_img:
@@ -160,9 +172,6 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
                     # timestamps.append(0.)
                     poses_list.append(pose)
                     # bds_list.append(bd)
-
-            # images_per_video = np.stack(images_per_video, axis=0)
-            # images.append(images_per_video)
             progress.refresh()
 
     images = torch.from_numpy(np.stack(images, axis=0))
@@ -170,7 +179,7 @@ def _load_data_from_json(root_fp, subject_id, factor=1, split='train', read_img=
     timestamps = np.array(timestamps).astype(np.float32)
     # bds_list = np.array(bds_list).astype(np.float32)
         
-    return images, poses_list, timestamps, bds_list, sizeofimage+1, (focal, HEIGHT, WIDTH)
+    return images, poses_list, timestamps, bds_list, sizeofimage+1, len(video_list), (focal, HEIGHT, WIDTH)
 
 
 class SubjectLoader(torch.utils.data.Dataset):
@@ -182,8 +191,11 @@ class SubjectLoader(torch.utils.data.Dataset):
         "cook_spinach", 
         "cut_roasted_beef", 
         "flame_salmon_1",
-         "flame_steak", 
-         "sear_steak"
+        "flame_salmon_2",
+        "flame_salmon_3",
+        "flame_salmon_4",
+        "flame_steak", 
+        "sear_steak"
     ]
 
     OPENGL_CAMERA = False
@@ -220,6 +232,7 @@ class SubjectLoader(torch.utils.data.Dataset):
             self.timestamps,
             self.bounds,
             self.images_per_video,
+            self.num_cameras,
             instrinc
         ) = _load_data_from_json(root_fp, subject_id, factor=factor, split=split, read_img=read_image)
 
@@ -299,12 +312,25 @@ class SubjectLoader(torch.utils.data.Dataset):
 
         if self.training:
             if self.batch_over_images:
-                image_id = torch.randint(
+                # image_id = torch.randint(
+                #     0,
+                #     len(self.images),
+                #     size=(num_rays,),
+                #     device=self.images.device,
+                # )
+                t_idx = torch.randint(
                     0,
-                    len(self.images),
+                    self.images_per_video,
                     size=(num_rays,),
                     device=self.images.device,
                 )
+                cam_id = torch.randint(
+                    0,
+                    self.num_cameras,
+                    size=(num_rays,),
+                    device=self.images.device,
+                )
+                image_id = cam_id * self.images_per_video + t_idx
             else:
                 image_id = [index]
             x = torch.randint(

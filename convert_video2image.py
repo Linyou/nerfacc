@@ -22,6 +22,7 @@ def natural_keys(text):
 
 data_path_root = '/home/loyot/workspace/Datasets/NeRF/3d_vedio_datasets/'
 scenes = ['coffee_martini', 'cook_spinach', 'cut_roasted_beef', 'flame_salmon_1', 'flame_steak', 'sear_steak']
+scenes = ['flame_salmon_1',]
 ori_res = (2028, 2704)
 dst_res = (int(2704/2), int(2028/2))
 
