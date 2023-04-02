@@ -299,7 +299,7 @@ grad_scaler = torch.cuda.amp.GradScaler()
 # setup the radiance field we want to train.
 radiance_field = DNGPradianceField(
     aabb=aabb_bkgd,
-    log2_hashmap_size=21,
+    log2_hashmap_size=19,
     n_levels=16,
     n_features_per_level=2,
     base_resolution=16,
@@ -343,34 +343,35 @@ camera_fuse = torch.cat([
     train_dataset.camtoworlds,
     # test_dataset.camtoworlds,
 ])
-print("grid before mask: ", occupancy_grid.occs[occupancy_grid.occs>=0].shape)
-if add_cam:
-    # for i in range(train_dataset.K.shape[0]):
-    #     occupancy_grid.mark_invisible_cells(
-    #         train_dataset.K[i].to(device), 
-    #         camera_fuse[i:i+1].to(device), 
-    #         [train_dataset.width, train_dataset.height],
-    #         near_plane,
-    #     )
-    occupancy_grid.mark_invisible_cells(
-        train_dataset.K[30].to(device), 
-        camera_fuse.to(device), 
-        [train_dataset.width, train_dataset.height],
-        near_plane,
-    )
-else:
-    occupancy_grid.mark_invisible_cells(
-        train_dataset.K.to(device), 
-        camera_fuse.to(device), 
-        [train_dataset.width, train_dataset.height],
-        near_plane,
-    )
-print("grid after mask: ", occupancy_grid.occs[occupancy_grid.occs>=0].shape)
 
 if args.gui_only:
     state_dict = torch.load(args.load_model)
     radiance_field.load_state_dict(state_dict["radiance_field"])
     occupancy_grid.load_state_dict(state_dict["occupancy_grid"])
+
+    print("grid before mask: ", occupancy_grid.occs[occupancy_grid.occs>=0].shape)
+    if add_cam:
+        # for i in range(train_dataset.K.shape[0]):
+        #     occupancy_grid.mark_invisible_cells(
+        #         train_dataset.K[i].to(device), 
+        #         camera_fuse[i:i+1].to(device), 
+        #         [train_dataset.width, train_dataset.height],
+        #         near_plane,
+        #     )
+        occupancy_grid.mark_invisible_cells(
+            train_dataset.K[30].to(device), 
+            camera_fuse.to(device), 
+            [train_dataset.width, train_dataset.height],
+            near_plane,
+        )
+    else:
+        occupancy_grid.mark_invisible_cells(
+            train_dataset.K.to(device), 
+            camera_fuse.to(device), 
+            [train_dataset.width, train_dataset.height],
+            near_plane,
+        )
+    print("grid after mask: ", occupancy_grid.occs[occupancy_grid.occs>=0].shape)
 
     gui_args = {
         'train_dataset': train_dataset, 
@@ -396,6 +397,30 @@ if args.gui_only:
     )
     render_gui(ngp)
     exit()
+else:
+    print("grid before mask: ", occupancy_grid.occs[occupancy_grid.occs>=0].shape)
+    if add_cam:
+        # for i in range(train_dataset.K.shape[0]):
+        #     occupancy_grid.mark_invisible_cells(
+        #         train_dataset.K[i].to(device), 
+        #         camera_fuse[i:i+1].to(device), 
+        #         [train_dataset.width, train_dataset.height],
+        #         near_plane,
+        #     )
+        occupancy_grid.mark_invisible_cells(
+            train_dataset.K[30].to(device), 
+            camera_fuse.to(device), 
+            [train_dataset.width, train_dataset.height],
+            near_plane,
+        )
+    else:
+        occupancy_grid.mark_invisible_cells(
+            train_dataset.K.to(device), 
+            camera_fuse.to(device), 
+            [train_dataset.width, train_dataset.height],
+            near_plane,
+        )
+    print("grid after mask: ", occupancy_grid.occs[occupancy_grid.occs>=0].shape)
 
 
 if args.vis_nerf:
